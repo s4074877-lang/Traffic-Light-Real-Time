@@ -1,4 +1,4 @@
-ARTIFACT = Local_Controller_Intersection
+ARTIFACT = local_intersection_controller
 
 #Build architecture/variant string, possible values: x86, armv7le, etc...
 PLATFORM ?= x86_64
@@ -18,6 +18,7 @@ LD = $(CC)
 
 #User defined include/preprocessor flags and libraries
 
+INCLUDES += -I../common
 #INCLUDES += -I/path/to/my/lib/include
 #INCLUDES += -I../mylib/public
 

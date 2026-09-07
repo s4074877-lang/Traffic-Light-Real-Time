@@ -18,6 +18,7 @@ LD = $(CC)
 
 #User defined include/preprocessor flags and libraries
 
+INCLUDES += -I../common
 #INCLUDES += -I/path/to/my/lib/include
 #INCLUDES += -I../mylib/public
 

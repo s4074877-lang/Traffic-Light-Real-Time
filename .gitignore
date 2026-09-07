@@ -1,41 +1,30 @@
-# Eclipse/QNX Momentics IDE
-/.metadata/
-.project
+# Eclipse/CDT project files
+.metadata/
 .cproject
+.project
 .settings/
-.trgtproject
 
-# Build artifacts
+# Build output
 build/
-output/
 *.o
 *.obj
 *.exe
 *.out
 *.a
 *.so
-*.dylib
+*.dll
 
-# QNX specific
-x86_64-debug/
-x86_64-release/
-aarch64le-debug/
-aarch64le-release/
+# Windows artifacts
+nul
+Thumbs.db
+*.log
 
-# Editor files
-*.swp
-*.swo
-*~
+# IDE directories
 .vscode/
 .idea/
 
-# OS files
-.DS_Store
-Thumbs.db
-desktop.ini
+# VM folders
+vm*/
 
-# Logs
-*.log
-
-#vm
-./vm1/
+# Prompt/docs (if not needed in repo)
+# prompt/
