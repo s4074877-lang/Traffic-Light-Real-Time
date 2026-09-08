@@ -24,6 +24,12 @@ typedef struct {
     char last_send_train[32];
     char last_local_update[32];
     char last_train_update[32];
+    char local_status[64];
+    char train_status[64];
+    char last_fault[64];
+
+    int local_heartbeat_misses;
+    int train_heartbeat_misses;
 
     // Flags
     int ui_needs_update;
@@ -38,6 +44,11 @@ static void print_usage(const char *prog) {
     printf("Usage: %s [-l | -g]\n", prog);
     printf("  -l  Local mode (single VM testing)\n");
     printf("  -g  Global mode (multi VM with GNS) [default]\n");
+}
+
+static void copy_message_data(char *dest, size_t dest_len, const char *src) {
+    strncpy(dest, src, dest_len - 1);
+    dest[dest_len - 1] = '\0';
 }
 
 // Clear screen
@@ -68,6 +79,16 @@ static void display_ui(void) {
            COLOR_RESET,
            state.last_local_update[0] ? state.last_local_update : "N/A");
 
+    printf("Local status: %s\n",
+           state.local_status[0] ? state.local_status : "N/A");
+    printf("Railway status: %s\n",
+           state.train_status[0] ? state.train_status : "N/A");
+    printf("Last fault: %s\n",
+           state.last_fault[0] ? state.last_fault : "N/A");
+    printf("Heartbeat misses: local %d/%d, railway %d/%d\n",
+           state.local_heartbeat_misses, HEARTBEAT_MISS_THRESHOLD,
+           state.train_heartbeat_misses, HEARTBEAT_MISS_THRESHOLD);
+
     printf("%s==========================================================%s\n", COLOR_BOLD, COLOR_RESET);
 
     // Message timestamps
@@ -81,7 +102,7 @@ static void display_ui(void) {
            state.last_send_train[0] ? state.last_send_train : "N/A");
 
     printf("%s==========================================================%s\n", COLOR_BOLD, COLOR_RESET);
-    printf("Message send: send-train | send-local\n");
+    printf("Commands: mode-fixed | mode-sensor | status | quit\n");
     printf("%s==========================================================%s\n", COLOR_BOLD, COLOR_RESET);
     printf("\n%sMessage:%s ", COLOR_BOLD, COLOR_RESET);
     fflush(stdout);
@@ -113,9 +134,56 @@ static int handle_test_message(int rcvid, test_message_t *msg, reply_t *reply, v
     return 0;
 }
 
+static int handle_status_update(int rcvid, test_message_t *msg, reply_t *reply, void *ctx) {
+    (void)rcvid;
+    central_state_t *s = (central_state_t *)ctx;
+
+    pthread_mutex_lock(&s->mutex);
+    copy_message_data(s->local_status, sizeof(s->local_status), msg->data);
+    get_timestamp(s->last_local_update, sizeof(s->last_local_update));
+    s->ui_needs_update = 1;
+    pthread_mutex_unlock(&s->mutex);
+
+    reply->status = 0;
+    get_timestamp(reply->timestamp, sizeof(reply->timestamp));
+    return 0;
+}
+
+static int handle_railway_status(int rcvid, test_message_t *msg, reply_t *reply, void *ctx) {
+    (void)rcvid;
+    central_state_t *s = (central_state_t *)ctx;
+
+    pthread_mutex_lock(&s->mutex);
+    copy_message_data(s->train_status, sizeof(s->train_status), msg->data);
+    get_timestamp(s->last_train_update, sizeof(s->last_train_update));
+    s->ui_needs_update = 1;
+    pthread_mutex_unlock(&s->mutex);
+
+    reply->status = 0;
+    get_timestamp(reply->timestamp, sizeof(reply->timestamp));
+    return 0;
+}
+
+static int handle_fault_alert(int rcvid, test_message_t *msg, reply_t *reply, void *ctx) {
+    (void)rcvid;
+    central_state_t *s = (central_state_t *)ctx;
+
+    pthread_mutex_lock(&s->mutex);
+    copy_message_data(s->last_fault, sizeof(s->last_fault), msg->data);
+    s->ui_needs_update = 1;
+    pthread_mutex_unlock(&s->mutex);
+
+    reply->status = 0;
+    get_timestamp(reply->timestamp, sizeof(reply->timestamp));
+    return 0;
+}
+
 // Message handlers array
 static message_handler_entry_t handlers[] = {
-    { MSG_TEST, 0, handle_test_message }  // 0 = accept from any controller
+    { MSG_TEST, 0, handle_test_message },
+    { MSG_STATUS_UPDATE, CONTROLLER_LOCAL, handle_status_update },
+    { MSG_RAILWAY_STATUS, CONTROLLER_TRAIN, handle_railway_status },
+    { MSG_FAULT_ALERT, 0, handle_fault_alert }
 };
 
 // Thread to handle incoming messages
@@ -133,6 +201,7 @@ static void* connection_thread(void *arg) {
         // Try connecting to local
         if (connection_try_connect(&state.local_conn)) {
             pthread_mutex_lock(&state.mutex);
+            state.local_heartbeat_misses = 0;
             get_timestamp(state.last_local_update, sizeof(state.last_local_update));
             state.ui_needs_update = 1;
             pthread_mutex_unlock(&state.mutex);
@@ -141,6 +210,7 @@ static void* connection_thread(void *arg) {
         // Try connecting to train
         if (connection_try_connect(&state.train_conn)) {
             pthread_mutex_lock(&state.mutex);
+            state.train_heartbeat_misses = 0;
             get_timestamp(state.last_train_update, sizeof(state.last_train_update));
             state.ui_needs_update = 1;
             pthread_mutex_unlock(&state.mutex);
@@ -180,22 +250,28 @@ static void* heartbeat_thread(void *arg) {
 
         // Check local connection
         if (connection_is_connected(&state.local_conn)) {
-            if (send_heartbeat(&state.local_conn, CONTROLLER_CENTRAL, CONTROLLER_LOCAL) != 0) {
-                pthread_mutex_lock(&state.mutex);
-                get_timestamp(state.last_local_update, sizeof(state.last_local_update));
-                state.ui_needs_update = 1;
-                pthread_mutex_unlock(&state.mutex);
+            int result = send_heartbeat(&state.local_conn, CONTROLLER_CENTRAL, CONTROLLER_LOCAL);
+            pthread_mutex_lock(&state.mutex);
+            if (result == 0) {
+                state.local_heartbeat_misses = 0;
+            } else if (state.local_heartbeat_misses < HEARTBEAT_MISS_THRESHOLD) {
+                state.local_heartbeat_misses++;
             }
+            state.ui_needs_update = 1;
+            pthread_mutex_unlock(&state.mutex);
         }
 
         // Check train connection
         if (connection_is_connected(&state.train_conn)) {
-            if (send_heartbeat(&state.train_conn, CONTROLLER_CENTRAL, CONTROLLER_TRAIN) != 0) {
-                pthread_mutex_lock(&state.mutex);
-                get_timestamp(state.last_train_update, sizeof(state.last_train_update));
-                state.ui_needs_update = 1;
-                pthread_mutex_unlock(&state.mutex);
+            int result = send_heartbeat(&state.train_conn, CONTROLLER_CENTRAL, CONTROLLER_TRAIN);
+            pthread_mutex_lock(&state.mutex);
+            if (result == 0) {
+                state.train_heartbeat_misses = 0;
+            } else if (state.train_heartbeat_misses < HEARTBEAT_MISS_THRESHOLD) {
+                state.train_heartbeat_misses++;
             }
+            state.ui_needs_update = 1;
+            pthread_mutex_unlock(&state.mutex);
         }
     }
 
@@ -203,51 +279,50 @@ static void* heartbeat_thread(void *arg) {
 }
 
 // Execute command
-static int execute_command(const char *cmd) {
-    if (strcmp(cmd, "send-local") == 0) {
-        pthread_mutex_lock(&state.mutex);
-        int connected = state.local_conn.connected;
-        pthread_mutex_unlock(&state.mutex);
+static int send_mode_command(const char *mode) {
+    pthread_mutex_lock(&state.mutex);
+    int connected = state.local_conn.connected;
+    pthread_mutex_unlock(&state.mutex);
 
-        if (!connected) {
-            printf("%sLocal controller not connected%s\n", COLOR_RED, COLOR_RESET);
-            return -1;
-        }
-
-        if (send_test_message(&state.local_conn, CONTROLLER_CENTRAL, CONTROLLER_LOCAL) == 0) {
-            pthread_mutex_lock(&state.mutex);
-            get_timestamp(state.last_send_local, sizeof(state.last_send_local));
-            state.ui_needs_update = 1;
-            pthread_mutex_unlock(&state.mutex);
-        } else {
-            printf("%sFailed to send message%s\n", COLOR_RED, COLOR_RESET);
-            return -1;
-        }
-    } else if (strcmp(cmd, "send-train") == 0) {
-        pthread_mutex_lock(&state.mutex);
-        int connected = state.train_conn.connected;
-        pthread_mutex_unlock(&state.mutex);
-
-        if (!connected) {
-            printf("%sTrain controller not connected%s\n", COLOR_RED, COLOR_RESET);
-            return -1;
-        }
-
-        if (send_test_message(&state.train_conn, CONTROLLER_CENTRAL, CONTROLLER_TRAIN) == 0) {
-            pthread_mutex_lock(&state.mutex);
-            get_timestamp(state.last_send_train, sizeof(state.last_send_train));
-            state.ui_needs_update = 1;
-            pthread_mutex_unlock(&state.mutex);
-        } else {
-            printf("%sFailed to send message%s\n", COLOR_RED, COLOR_RESET);
-            return -1;
-        }
-    } else {
-        printf("%sUnknown command. Use: send-train | send-local%s\n", COLOR_RED, COLOR_RESET);
+    if (!connected) {
+        printf("%sLocal controller not connected%s\n", COLOR_RED, COLOR_RESET);
         return -1;
     }
 
+    test_message_t msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.header.type = MSG_MODE_COMMAND;
+    msg.header.src = CONTROLLER_CENTRAL;
+    msg.header.dst = CONTROLLER_LOCAL;
+    copy_message_data(msg.data, sizeof(msg.data), mode);
+    get_timestamp(msg.header.timestamp, sizeof(msg.header.timestamp));
+
+    reply_t reply;
+    if (send_message(&state.local_conn, &msg, &reply) != 0) {
+        printf("%sFailed to send mode command%s\n", COLOR_RED, COLOR_RESET);
+        return -1;
+    }
+
+    pthread_mutex_lock(&state.mutex);
+    get_timestamp(state.last_send_local, sizeof(state.last_send_local));
+    state.ui_needs_update = 1;
+    pthread_mutex_unlock(&state.mutex);
     return 0;
+}
+
+static int execute_command(const char *cmd) {
+    if (strcmp(cmd, "mode-fixed") == 0) {
+        return send_mode_command("FIXED");
+    } else if (strcmp(cmd, "mode-sensor") == 0) {
+        return send_mode_command("SENSOR");
+    } else if (strcmp(cmd, "status") == 0) {
+        display_ui();
+        return 0;
+    }
+
+    printf("%sUnknown command. Use: mode-fixed | mode-sensor | status | quit%s\n",
+           COLOR_RED, COLOR_RESET);
+    return -1;
 }
 
 int main(int argc, char *argv[]) {
@@ -321,7 +396,7 @@ int main(int argc, char *argv[]) {
                 continue;
             }
 
-            if (strcmp(cmd, "quit") == 0 || strcmp(cmd, "exit") == 0) {
+            if (strcmp(cmd, "quit") == 0) {
                 printf("Exiting...\n");
                 break;
             }

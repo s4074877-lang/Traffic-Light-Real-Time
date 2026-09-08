@@ -9,7 +9,13 @@
 // Message types
 typedef enum {
     MSG_TEST = 1,           // Test message between controllers
-    MSG_HEARTBEAT = 2       // Keep-alive (future use)
+    MSG_HEARTBEAT = 2,      // Keep-alive
+    MSG_MODE_COMMAND = 3,   // Central -> Local
+    MSG_STATUS_UPDATE = 4,  // Local -> Central
+    MSG_FAULT_ALERT = 5,    // Local/Railway -> Central
+    MSG_RAILWAY_PREEMPT = 6,// Railway -> Local
+    MSG_TRAIN_CLEAR = 7,    // Railway -> Local
+    MSG_RAILWAY_STATUS = 8  // Railway -> Central
 } msg_type_t;
 
 // Controller types

@@ -22,7 +22,8 @@
 
 // Timing
 #define UI_CHECK_INTERVAL    1  // seconds - check for UI updates
-#define HEARTBEAT_INTERVAL   3  // seconds - check connection alive
+#define HEARTBEAT_INTERVAL   1  // seconds - check connection alive
+#define HEARTBEAT_MISS_THRESHOLD 3 // consecutive misses before link is down
 
 // ANSI color codes
 #define COLOR_RESET     "\033[0m"
