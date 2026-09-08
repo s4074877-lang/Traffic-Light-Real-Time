@@ -4,207 +4,341 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <errno.h>
-#include <sys/neutrino.h>
-#include <sys/dispatch.h>
 
 #include "../../common/common.h"
+#include "../../common/communication/connection.h"
+#include "../../common/communication/send.h"
+#include "../../common/communication/receive.h"
 
-// Global state
-static crossing_state_t current_state = CROSSING_OPEN;  // Default state
-static int connected_to_central = 0;
-static int connection_msg_printed = 0;
-static pthread_mutex_t state_mutex = PTHREAD_MUTEX_INITIALIZER;
-static int central_coid = -1;  // Connection to central
+// Controller state
+typedef struct {
+    // Connections
+    connection_t central_conn;
+    connection_t local_conn;
+    connection_mode_t mode;
 
-// Thread to handle incoming messages from central
-void* message_handler(void *arg) {
-    name_attach_t *attach = (name_attach_t *)arg;
-    controller_msg_t msg;
-    controller_reply_t reply;
-    int rcvid;
+    // Timestamps
+    char last_recv_central[32];
+    char last_recv_local[32];
+    char last_send_central[32];
+    char last_send_local[32];
+    char last_central_update[32];
+    char last_local_update[32];
+
+    // Flags
+    int ui_needs_update;
+
+    pthread_mutex_t mutex;
+} train_state_t;
+
+static train_state_t state;
+static name_attach_t *attach = NULL;
+
+static void print_usage(const char *prog) {
+    printf("Usage: %s [-l | -g]\n", prog);
+    printf("  -l  Local mode (single VM testing)\n");
+    printf("  -g  Global mode (multi VM with GNS) [default]\n");
+}
+
+// Clear screen
+static void clear_screen(void) {
+    printf("\033[2J\033[H");
+}
+
+// Display UI
+static void display_ui(void) {
+    pthread_mutex_lock(&state.mutex);
+
+    clear_screen();
+
+    printf("%s==========================================================%s\n", COLOR_BOLD, COLOR_RESET);
+    printf("%s                    TRAIN CONTROLLER%s\n", COLOR_BOLD, COLOR_RESET);
+    printf("%s==========================================================%s\n", COLOR_BOLD, COLOR_RESET);
+
+    // Connection status
+    printf("Connected to central_controller [%s%s%s] last update [%s]\n",
+           state.central_conn.connected ? COLOR_GREEN : COLOR_RED,
+           state.central_conn.connected ? "CONNECTED" : "DISCONNECTED",
+           COLOR_RESET,
+           state.last_central_update[0] ? state.last_central_update : "N/A");
+
+    printf("Connected to local_controller [%s%s%s] last update [%s]\n",
+           state.local_conn.connected ? COLOR_GREEN : COLOR_RED,
+           state.local_conn.connected ? "CONNECTED" : "DISCONNECTED",
+           COLOR_RESET,
+           state.last_local_update[0] ? state.last_local_update : "N/A");
+
+    printf("%s==========================================================%s\n", COLOR_BOLD, COLOR_RESET);
+
+    // Message timestamps
+    printf("last message receive central [%s]\n",
+           state.last_recv_central[0] ? state.last_recv_central : "N/A");
+    printf("last message receive local [%s]\n",
+           state.last_recv_local[0] ? state.last_recv_local : "N/A");
+    printf("message send central [%s]\n",
+           state.last_send_central[0] ? state.last_send_central : "N/A");
+    printf("message send local [%s]\n",
+           state.last_send_local[0] ? state.last_send_local : "N/A");
+
+    printf("%s==========================================================%s\n", COLOR_BOLD, COLOR_RESET);
+    printf("Message send: send-local | send-central\n");
+    printf("%s==========================================================%s\n", COLOR_BOLD, COLOR_RESET);
+    printf("\n%sMessage:%s ", COLOR_BOLD, COLOR_RESET);
+    fflush(stdout);
+
+    state.ui_needs_update = 0;
+    pthread_mutex_unlock(&state.mutex);
+}
+
+// Handler for test messages
+static int handle_test_message(int rcvid, test_message_t *msg, reply_t *reply, void *ctx) {
+    (void)rcvid;
+    train_state_t *s = (train_state_t *)ctx;
+
+    pthread_mutex_lock(&s->mutex);
+
+    if (msg->header.src == CONTROLLER_CENTRAL) {
+        strncpy(s->last_recv_central, msg->header.timestamp, sizeof(s->last_recv_central) - 1);
+        get_timestamp(s->last_central_update, sizeof(s->last_central_update));
+    } else if (msg->header.src == CONTROLLER_LOCAL) {
+        strncpy(s->last_recv_local, msg->header.timestamp, sizeof(s->last_recv_local) - 1);
+        get_timestamp(s->last_local_update, sizeof(s->last_local_update));
+    }
+
+    s->ui_needs_update = 1;
+    pthread_mutex_unlock(&s->mutex);
+
+    reply->status = 0;
+    get_timestamp(reply->timestamp, sizeof(reply->timestamp));
+    return 0;
+}
+
+// Message handlers array
+static message_handler_entry_t handlers[] = {
+    { MSG_TEST, 0, handle_test_message }
+};
+
+// Thread to handle incoming messages
+static void* message_handler_thread(void *arg) {
+    receive_context_t *ctx = (receive_context_t *)arg;
+    receive_loop(ctx);
+    return NULL;
+}
+
+// Thread to manage connections
+static void* connection_thread(void *arg) {
+    (void)arg;
 
     while (1) {
-        rcvid = MsgReceive(attach->chid, &msg, sizeof(msg), NULL);
-        if (rcvid == -1) {
-            continue;
+        // Try connecting to central
+        if (connection_try_connect(&state.central_conn)) {
+            pthread_mutex_lock(&state.mutex);
+            get_timestamp(state.last_central_update, sizeof(state.last_central_update));
+            state.ui_needs_update = 1;
+            pthread_mutex_unlock(&state.mutex);
+
+            // Send initial message to notify central we're connected
+            send_test_message(&state.central_conn, CONTROLLER_TRAIN, CONTROLLER_CENTRAL);
         }
 
-        if (rcvid == 0) {
-            // Pulse received (system message)
-            continue;
+        // Try connecting to local
+        if (connection_try_connect(&state.local_conn)) {
+            pthread_mutex_lock(&state.mutex);
+            get_timestamp(state.last_local_update, sizeof(state.last_local_update));
+            state.ui_needs_update = 1;
+            pthread_mutex_unlock(&state.mutex);
+
+            // Send initial message to notify local we're connected
+            send_test_message(&state.local_conn, CONTROLLER_TRAIN, CONTROLLER_LOCAL);
         }
 
-        // Handle message based on type
-        if (msg.type == MSG_COMMAND && msg.controller == CONTROLLER_TRAIN) {
-            pthread_mutex_lock(&state_mutex);
-            crossing_state_t old_state = current_state;
-            current_state = msg.state.crossing;
+        sleep(2);
+    }
 
-            if (old_state != current_state) {
-                char ts[32];
-                get_timestamp(ts, sizeof(ts));
-                printf("[%s] State changed to: %s%s%s\n",
-                       ts,
-                       crossing_state_color(current_state),
-                       crossing_state_str(current_state),
-                       COLOR_RESET);
-                fflush(stdout);
+    return NULL;
+}
+
+// Thread to refresh UI periodically
+static void* ui_refresh_thread(void *arg) {
+    (void)arg;
+
+    while (1) {
+        pthread_mutex_lock(&state.mutex);
+        int needs_update = state.ui_needs_update;
+        pthread_mutex_unlock(&state.mutex);
+
+        if (needs_update) {
+            display_ui();
+        }
+
+        sleep(UI_CHECK_INTERVAL);
+    }
+
+    return NULL;
+}
+
+// Thread to check connection health via heartbeat
+static void* heartbeat_thread(void *arg) {
+    (void)arg;
+
+    while (1) {
+        sleep(HEARTBEAT_INTERVAL);
+
+        // Check central connection
+        if (connection_is_connected(&state.central_conn)) {
+            if (send_heartbeat(&state.central_conn, CONTROLLER_TRAIN, CONTROLLER_CENTRAL) != 0) {
+                pthread_mutex_lock(&state.mutex);
+                get_timestamp(state.last_central_update, sizeof(state.last_central_update));
+                state.ui_needs_update = 1;
+                pthread_mutex_unlock(&state.mutex);
             }
-            pthread_mutex_unlock(&state_mutex);
+        }
 
-            reply.status = 0;
-            MsgReply(rcvid, 0, &reply, sizeof(reply));
-
-            // Send status update back to central if connected
-            if (central_coid != -1) {
-                controller_msg_t status_msg;
-                status_msg.type = MSG_STATUS_UPDATE;
-                status_msg.controller = CONTROLLER_TRAIN;
-                status_msg.state.crossing = current_state;
-                get_timestamp(status_msg.timestamp, sizeof(status_msg.timestamp));
-
-                controller_reply_t status_reply;
-                if (MsgSend(central_coid, &status_msg, sizeof(status_msg),
-                           &status_reply, sizeof(status_reply)) == -1) {
-                    // Connection lost
-                    pthread_mutex_lock(&state_mutex);
-                    connected_to_central = 0;
-                    connection_msg_printed = 0;
-                    ConnectDetach(central_coid);
-                    central_coid = -1;
-                    pthread_mutex_unlock(&state_mutex);
-                }
+        // Check local connection
+        if (connection_is_connected(&state.local_conn)) {
+            if (send_heartbeat(&state.local_conn, CONTROLLER_TRAIN, CONTROLLER_LOCAL) != 0) {
+                pthread_mutex_lock(&state.mutex);
+                get_timestamp(state.last_local_update, sizeof(state.last_local_update));
+                state.ui_needs_update = 1;
+                pthread_mutex_unlock(&state.mutex);
             }
-        } else {
-            reply.status = -1;
-            MsgReply(rcvid, 0, &reply, sizeof(reply));
         }
     }
 
     return NULL;
 }
 
-// Thread to try connecting to central controller
-void* connection_thread(void *arg) {
-    (void)arg;
-    char central_path[256];
+// Execute command
+static int execute_command(const char *cmd) {
+    if (strcmp(cmd, "send-central") == 0) {
+        pthread_mutex_lock(&state.mutex);
+        int connected = state.central_conn.connected;
+        pthread_mutex_unlock(&state.mutex);
 
-    while (1) {
-        pthread_mutex_lock(&state_mutex);
-        int is_connected = connected_to_central;
-        pthread_mutex_unlock(&state_mutex);
-
-        if (!is_connected) {
-            // Try to connect via QNET
-            snprintf(central_path, sizeof(central_path),
-                    "/net/%s/dev/name/local/%s", VM_CENTRAL, CENTRAL_SERVICE_NAME);
-
-            int coid = name_open(CENTRAL_SERVICE_NAME, NAME_FLAG_ATTACH_GLOBAL);
-
-            if (coid == -1) {
-                // Try direct QNET path
-                coid = open(central_path, O_RDWR);
-            }
-
-            if (coid != -1) {
-                pthread_mutex_lock(&state_mutex);
-                central_coid = coid;
-                connected_to_central = 1;
-
-                char ts[32];
-                get_timestamp(ts, sizeof(ts));
-                printf("%s[%s] Connected to central controller%s\n",
-                       COLOR_GREEN, ts, COLOR_RESET);
-                fflush(stdout);
-
-                // Send initial status
-                controller_msg_t status_msg;
-                status_msg.type = MSG_STATUS_UPDATE;
-                status_msg.controller = CONTROLLER_TRAIN;
-                status_msg.state.crossing = current_state;
-                get_timestamp(status_msg.timestamp, sizeof(status_msg.timestamp));
-
-                controller_reply_t reply;
-                if (MsgSend(central_coid, &status_msg, sizeof(status_msg),
-                           &reply, sizeof(reply)) == -1) {
-                    connected_to_central = 0;
-                    ConnectDetach(central_coid);
-                    central_coid = -1;
-                }
-
-                connection_msg_printed = 0;
-                pthread_mutex_unlock(&state_mutex);
-            } else {
-                pthread_mutex_lock(&state_mutex);
-                if (!connection_msg_printed) {
-                    char ts[32];
-                    get_timestamp(ts, sizeof(ts));
-                    printf("%s[%s] Waiting connection from central controller%s\n",
-                           COLOR_YELLOW, ts, COLOR_RESET);
-                    fflush(stdout);
-                    connection_msg_printed = 1;
-                }
-                pthread_mutex_unlock(&state_mutex);
-            }
+        if (!connected) {
+            printf("%sCentral controller not connected%s\n", COLOR_RED, COLOR_RESET);
+            return -1;
         }
 
-        sleep(2);  // Retry connection every 2 seconds
+        if (send_test_message(&state.central_conn, CONTROLLER_TRAIN, CONTROLLER_CENTRAL) == 0) {
+            pthread_mutex_lock(&state.mutex);
+            get_timestamp(state.last_send_central, sizeof(state.last_send_central));
+            state.ui_needs_update = 1;
+            pthread_mutex_unlock(&state.mutex);
+        } else {
+            printf("%sFailed to send message%s\n", COLOR_RED, COLOR_RESET);
+            return -1;
+        }
+    } else if (strcmp(cmd, "send-local") == 0) {
+        pthread_mutex_lock(&state.mutex);
+        int connected = state.local_conn.connected;
+        pthread_mutex_unlock(&state.mutex);
+
+        if (!connected) {
+            printf("%sLocal controller not connected%s\n", COLOR_RED, COLOR_RESET);
+            return -1;
+        }
+
+        if (send_test_message(&state.local_conn, CONTROLLER_TRAIN, CONTROLLER_LOCAL) == 0) {
+            pthread_mutex_lock(&state.mutex);
+            get_timestamp(state.last_send_local, sizeof(state.last_send_local));
+            state.ui_needs_update = 1;
+            pthread_mutex_unlock(&state.mutex);
+        } else {
+            printf("%sFailed to send message%s\n", COLOR_RED, COLOR_RESET);
+            return -1;
+        }
+    } else {
+        printf("%sUnknown command. Use: send-central | send-local%s\n", COLOR_RED, COLOR_RESET);
+        return -1;
     }
 
-    return NULL;
+    return 0;
 }
 
 int main(int argc, char *argv[]) {
-    (void)argc;
-    (void)argv;
+    // Parse command line arguments
+    connection_mode_t mode = connection_parse_args(argc, argv);
 
-    printf("%s========================================%s\n", COLOR_BOLD, COLOR_RESET);
-    printf("%s       TRAIN CONTROLLER%s\n", COLOR_BOLD, COLOR_RESET);
-    printf("%s========================================%s\n", COLOR_BOLD, COLOR_RESET);
-    printf("Default state: %s%s%s\n\n",
-           crossing_state_color(current_state),
-           crossing_state_str(current_state),
-           COLOR_RESET);
-    fflush(stdout);
+    // Check for help
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            print_usage(argv[0]);
+            return EXIT_SUCCESS;
+        }
+    }
 
-    // Create channel for receiving messages
-    name_attach_t *attach = name_attach(NULL, TRAIN_SERVICE_NAME, NAME_FLAG_ATTACH_GLOBAL);
+    // Initialize state
+    memset(&state, 0, sizeof(state));
+    pthread_mutex_init(&state.mutex, NULL);
+    state.mode = mode;
+    state.ui_needs_update = 1;
+    connection_init(&state.central_conn, CENTRAL_SERVICE_NAME, mode, &state.mutex);
+    connection_init(&state.local_conn, LOCAL_SERVICE_NAME, mode, &state.mutex);
+
+    // Register with name service
+    attach = connection_register_service(TRAIN_SERVICE_NAME, mode);
     if (attach == NULL) {
-        fprintf(stderr, "Failed to create channel: %s\n", strerror(errno));
         return EXIT_FAILURE;
     }
 
-    // Start message handler thread
-    pthread_t msg_thread;
-    if (pthread_create(&msg_thread, NULL, message_handler, attach) != 0) {
+    // Initialize receive context
+    receive_context_t recv_ctx;
+    receive_init(&recv_ctx, attach, handlers,
+                 sizeof(handlers) / sizeof(handlers[0]), &state);
+
+    // Start threads
+    pthread_t msg_thread, conn_thread, ui_thread, hb_thread;
+
+    if (pthread_create(&msg_thread, NULL, message_handler_thread, &recv_ctx) != 0) {
         fprintf(stderr, "Failed to create message handler thread\n");
         return EXIT_FAILURE;
     }
 
-    // Start connection thread
-    pthread_t conn_thread;
     if (pthread_create(&conn_thread, NULL, connection_thread, NULL) != 0) {
         fprintf(stderr, "Failed to create connection thread\n");
         return EXIT_FAILURE;
     }
 
-    // Main loop: print current state every 2 seconds
-    while (1) {
-        char ts[32];
-        get_timestamp(ts, sizeof(ts));
-
-        pthread_mutex_lock(&state_mutex);
-        printf("[%s] %s%s%s\n",
-               ts,
-               crossing_state_color(current_state),
-               crossing_state_str(current_state),
-               COLOR_RESET);
-        pthread_mutex_unlock(&state_mutex);
-
-        fflush(stdout);
-        sleep(STATE_PRINT_INTERVAL);
+    if (pthread_create(&ui_thread, NULL, ui_refresh_thread, NULL) != 0) {
+        fprintf(stderr, "Failed to create UI thread\n");
+        return EXIT_FAILURE;
     }
 
-    name_detach(attach, 0);
+    if (pthread_create(&hb_thread, NULL, heartbeat_thread, NULL) != 0) {
+        fprintf(stderr, "Failed to create heartbeat thread\n");
+        return EXIT_FAILURE;
+    }
+
+    // Initial UI display
+    display_ui();
+
+    // Main loop: read commands
+    char cmd[64];
+    while (1) {
+        if (fgets(cmd, sizeof(cmd), stdin) != NULL) {
+            cmd[strcspn(cmd, "\n")] = '\0';
+
+            if (strlen(cmd) == 0) {
+                display_ui();
+                continue;
+            }
+
+            if (strcmp(cmd, "quit") == 0 || strcmp(cmd, "exit") == 0) {
+                printf("Exiting...\n");
+                break;
+            }
+
+            execute_command(cmd);
+            sleep(1);
+            display_ui();
+        }
+    }
+
+    // Cleanup
+    connection_close(&state.central_conn);
+    connection_close(&state.local_conn);
+    connection_unregister_service(attach);
+    pthread_mutex_destroy(&state.mutex);
     return EXIT_SUCCESS;
 }

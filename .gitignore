@@ -27,4 +27,7 @@ Thumbs.db
 vm*/
 
 # Prompt/docs (if not needed in repo)
-# prompt/
+/prompt
+
+#other
+GNS_SETUP_GUIDE.md
