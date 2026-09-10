@@ -1,0 +1,147 @@
+================================================================================
+                    TRAIN CONTROLLER SOURCE STRUCTURE
+================================================================================
+
+train_controller/
+└── src/
+    ├── train_controller.c      Main controller logic
+    └── ui/
+        ├── train_ui.h          UI module header
+        └── train_ui.c          UI module implementation
+
+================================================================================
+FILES OVERVIEW
+================================================================================
+
+1. train_controller.c
+   ---------------------
+   Main entry point and controller logic.
+
+   State Structure (train_controller_state_t):
+   - central_conn, local_conn    : Connection handles
+   - mode                        : Local or Global network mode
+   - last_recv_*, last_send_*    : Message timestamps
+   - ui_needs_update             : Flag to trigger UI refresh
+   - mutex                       : Thread synchronization
+
+   Threads:
+   - message_handler_thread      : Receives and processes incoming messages
+   - connection_thread           : Manages connections to Central and Local
+   - ui_refresh_thread           : Refreshes UI only when updates occur
+   - heartbeat_thread            : Checks connection health periodically
+
+   Functions:
+   - main()                      : Init, thread creation, command loop
+   - display_ui()                : Calls train_ui_display()
+   - handle_test_message()       : Handler for MSG_TEST messages
+   - execute_command()           : Processes user commands (send-central, send-local)
+
+
+2. ui/train_ui.h
+   ---------------------
+   Header file defining UI state and API.
+
+   Enums:
+   - track_direction_t           : TRACK_UP (W->S), TRACK_DOWN (S->W)
+   - track_state_t               : NONE, APPROACHING, ON_CROSSING, CLEARED
+   - flash_state_t               : OFF, ON
+   - train_frequency_t           : FREQ_PEAK (2 min), FREQ_NIGHT (20 min)
+   - train_signal_t              : PROCEED, STOP
+   - connection_status_t         : CONNECTED, LOST
+   - crossing_fault_t            : NONE, GATE_CLOSE_TIMEOUT, etc.
+
+   Structures:
+   - crossing_state_t            : State for one crossing (P1/P2/P3)
+   - message_info_t              : Last sent/received message info
+   - train_ui_state_t            : Complete UI state with mutex
+
+   API Functions:
+   - train_ui_init()             : Initialize UI state
+   - train_ui_destroy()          : Cleanup mutex
+   - train_ui_display()          : Render full UI to terminal
+   - train_ui_request_update()   : Mark UI for refresh
+   - train_ui_needs_update()     : Check if refresh needed
+   - train_ui_set_connection()   : Update connection status (on state change only)
+   - train_ui_set_crossing()     : Update full crossing state
+   - train_ui_set_track_state()  : Update single track direction
+   - train_ui_set_gate_state()   : Update boom gate
+   - train_ui_set_crossing_fault(): Update fault status
+   - train_ui_set_preempt_time() : Set preempt sent timestamp
+   - train_ui_set_clear_time()   : Set clear sent timestamp
+   - train_ui_set_frequency()    : Set train frequency mode
+   - train_ui_set_signal()       : Set train signal
+   - train_ui_set_time_scale()   : Set simulation time scale
+   - train_ui_set_last_sent()    : Update last sent message info
+   - train_ui_set_last_received(): Update last received message info
+   - train_ui_set_active_faults(): Update fault count
+   - train_ui_refresh_thread()   : Thread function for periodic UI check
+
+
+3. ui/train_ui.c
+   ---------------------
+   UI implementation with terminal display.
+
+   Features:
+   - Thread-safe (all setters use mutex)
+   - Only repaints when needs_update flag is set
+   - ANSI color codes for status highlighting
+   - Clear screen before each redraw
+
+   Display Layout:
+   ============================================================
+                    RAILWAY CONTROLLER STATUS
+   ============================================================
+   CONNECTIONS
+   ------------------------------------------------------------
+   CENTRAL            : [CONNECTED/LOST]   Last Updated: [HH:MM:SS]
+   LOCAL              : [CONNECTED/LOST]   Last Updated: [HH:MM:SS]
+   Train frequency    : [PEAK 2 min / NIGHT 20 min]   Time scale: [x10]
+   Train Signal       : [PROCEED / STOP]
+
+   ------------------------------------------------------------
+   CROSSING P1  (affects I1, I2)
+       Track UP (W->S)   : [NONE/APPROACHING/ON_CROSSING/CLEARED]
+       Track DOWN (S->W) : [NONE/APPROACHING/ON_CROSSING/CLEARED]
+       Boom Gate         : [OPEN/CLOSING/CLOSED/OPENING/FAULT]
+       Road Flash        : [ON/OFF]
+       Fault             : [NONE/GATE_CLOSE_TIMEOUT/...]
+       Preempt           : [SENT HH:MM:SS]   Clear: [SENT HH:MM:SS]
+
+   CROSSING P2  (affects I3, I4)  ...
+   CROSSING P3  (affects I5, I6)  ...
+
+   ------------------------------------------------------------
+   MESSAGES
+   ------------------------------------------------------------
+   Last Sent     : [HH:MM:SS] [TYPE] -> [DEST]
+   Last Received : [HH:MM:SS] [TYPE] <- [SRC]
+   Active Faults : [count]
+   ============================================================
+
+================================================================================
+DEPENDENCIES
+================================================================================
+
+External (from common/):
+- common.h              : Color codes, timestamps, service names
+- protocol.h            : Message types, controller types, gate_state_t
+- communication/
+  - connection.h        : Connection management
+  - send.h              : Message sending
+  - receive.h           : Message receiving
+
+================================================================================
+THREAD SYNCHRONIZATION
+================================================================================
+
+- train_controller_state_t.mutex  : Protects controller state
+- train_ui_state_t.mutex          : Protects UI state
+
+UI updates only trigger repaint (no continuous refresh):
+1. State change occurs
+2. Setter function called with new value
+3. needs_update flag set to 1
+4. ui_refresh_thread detects flag
+5. train_ui_display() called, flag cleared
+
+================================================================================
