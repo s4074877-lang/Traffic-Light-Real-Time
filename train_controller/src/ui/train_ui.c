@@ -125,6 +125,7 @@ void train_ui_init(train_ui_state_t *ui)
     ui->frequency = FREQ_PEAK;
     ui->time_scale = 10;
     ui->signal = SIGNAL_PROCEED;
+    ui->current_screen = UI_SCREEN_MENU;
     ui->needs_update = 1;
 
     // Initialize crossings
@@ -153,12 +154,9 @@ void train_ui_destroy(train_ui_state_t *ui)
     pthread_mutex_destroy(&ui->mutex);
 }
 
-void train_ui_display(train_ui_state_t *ui)
+// Internal: display status screen (must hold mutex)
+static void display_status_internal(train_ui_state_t *ui)
 {
-    pthread_mutex_lock(&ui->mutex);
-
-    clear_screen();
-
     // Header
     printf("============================================================\n");
     printf("%s                 RAILWAY CONTROLLER STATUS%s\n", COLOR_BOLD, COLOR_RESET);
@@ -209,9 +207,9 @@ void train_ui_display(train_ui_state_t *ui)
                COLOR_RESET);
 
         printf("    Boom Gate         : [%s%s%s]\n",
-               (c->boom_gate == GATE_FAULT) ? COLOR_RED : (c->boom_gate == GATE_CLOSED)                                ? COLOR_GREEN
-                                                      : (c->boom_gate == GATE_CLOSING || c->boom_gate == GATE_OPENING) ? COLOR_YELLOW
-                                                                                                                       : "",
+               (c->boom_gate == GATE_FAULT) ? COLOR_RED :
+               (c->boom_gate == GATE_CLOSED) ? COLOR_GREEN :
+               (c->boom_gate == GATE_CLOSING || c->boom_gate == GATE_OPENING) ? COLOR_YELLOW : "",
                gate_state_str(c->boom_gate),
                COLOR_RESET);
 
@@ -256,13 +254,113 @@ void train_ui_display(train_ui_state_t *ui)
            COLOR_RESET);
 
     printf("============================================================\n");
+    printf("\nPress %sq%s + Enter to return to main menu\n", COLOR_BOLD, COLOR_RESET);
+    printf("%s> %s", COLOR_BOLD, COLOR_RESET);
+    fflush(stdout);
+}
 
-    // Command prompt
+// Internal: display menu screen (must hold mutex)
+static void display_menu_internal(train_ui_state_t *ui)
+{
+    (void)ui;
+
+    printf("============================================================\n");
+    printf("%s                  TRAIN CONTROLLER MENU%s\n", COLOR_BOLD, COLOR_RESET);
+    printf("============================================================\n");
+    printf("\n");
+    printf("  %s1%s. View Status\n", COLOR_BOLD, COLOR_RESET);
+    printf("  %s2%s. Send Command\n", COLOR_BOLD, COLOR_RESET);
+    printf("  %s3%s. Exit\n", COLOR_BOLD, COLOR_RESET);
+    printf("\n");
+    printf("============================================================\n");
+    printf("\n%sSelect option:%s ", COLOR_BOLD, COLOR_RESET);
+    fflush(stdout);
+}
+
+// Internal: display command screen (must hold mutex)
+static void display_command_internal(train_ui_state_t *ui)
+{
+    (void)ui;
+
+    printf("============================================================\n");
+    printf("%s                   COMMAND INPUT%s\n", COLOR_BOLD, COLOR_RESET);
+    printf("============================================================\n");
+    printf("\n");
+    printf("  Available commands:\n");
+    printf("    %ssend-central%s  - Send test message to Central\n", COLOR_CYAN, COLOR_RESET);
+    printf("    %ssend-local%s    - Send test message to Local\n", COLOR_CYAN, COLOR_RESET);
+    printf("\n");
+    printf("  Press %sq%s + Enter to return to main menu\n", COLOR_BOLD, COLOR_RESET);
+    printf("\n");
+    printf("============================================================\n");
     printf("\n%sCommand:%s ", COLOR_BOLD, COLOR_RESET);
     fflush(stdout);
+}
+
+void train_ui_display(train_ui_state_t *ui)
+{
+    pthread_mutex_lock(&ui->mutex);
+
+    clear_screen();
+
+    switch (ui->current_screen)
+    {
+    case UI_SCREEN_MENU:
+        display_menu_internal(ui);
+        break;
+    case UI_SCREEN_STATUS:
+        display_status_internal(ui);
+        break;
+    case UI_SCREEN_COMMAND:
+        display_command_internal(ui);
+        break;
+    }
 
     ui->needs_update = 0;
     pthread_mutex_unlock(&ui->mutex);
+}
+
+void train_ui_display_menu(train_ui_state_t *ui)
+{
+    pthread_mutex_lock(&ui->mutex);
+    clear_screen();
+    display_menu_internal(ui);
+    ui->needs_update = 0;
+    pthread_mutex_unlock(&ui->mutex);
+}
+
+void train_ui_display_status(train_ui_state_t *ui)
+{
+    pthread_mutex_lock(&ui->mutex);
+    clear_screen();
+    display_status_internal(ui);
+    ui->needs_update = 0;
+    pthread_mutex_unlock(&ui->mutex);
+}
+
+void train_ui_display_command(train_ui_state_t *ui)
+{
+    pthread_mutex_lock(&ui->mutex);
+    clear_screen();
+    display_command_internal(ui);
+    ui->needs_update = 0;
+    pthread_mutex_unlock(&ui->mutex);
+}
+
+void train_ui_set_screen(train_ui_state_t *ui, ui_screen_t screen)
+{
+    pthread_mutex_lock(&ui->mutex);
+    ui->current_screen = screen;
+    ui->needs_update = 1;
+    pthread_mutex_unlock(&ui->mutex);
+}
+
+ui_screen_t train_ui_get_screen(train_ui_state_t *ui)
+{
+    pthread_mutex_lock(&ui->mutex);
+    ui_screen_t screen = ui->current_screen;
+    pthread_mutex_unlock(&ui->mutex);
+    return screen;
 }
 
 void train_ui_request_update(train_ui_state_t *ui)

@@ -55,10 +55,20 @@ FILES OVERVIEW
    - message_info_t              : Last sent/received message info
    - train_ui_state_t            : Complete UI state with mutex
 
+   Screen Types (ui_screen_t):
+   - UI_SCREEN_MENU              : Main menu screen
+   - UI_SCREEN_STATUS            : Status display screen
+   - UI_SCREEN_COMMAND           : Command input screen
+
    API Functions:
    - train_ui_init()             : Initialize UI state
    - train_ui_destroy()          : Cleanup mutex
-   - train_ui_display()          : Render full UI to terminal
+   - train_ui_display()          : Render current screen to terminal
+   - train_ui_display_menu()     : Render menu screen
+   - train_ui_display_status()   : Render status screen
+   - train_ui_display_command()  : Render command screen
+   - train_ui_set_screen()       : Change current screen
+   - train_ui_get_screen()       : Get current screen
    - train_ui_request_update()   : Mark UI for refresh
    - train_ui_needs_update()     : Check if refresh needed
    - train_ui_set_connection()   : Update connection status (on state change only)
@@ -87,7 +97,25 @@ FILES OVERVIEW
    - ANSI color codes for status highlighting
    - Clear screen before each redraw
 
-   Display Layout:
+   Menu Navigation:
+   - Main Menu: Options 1 (Status), 2 (Command), 3 (Exit)
+   - Status/Command screens: Press 'q' + Enter to return to menu
+   - Auto-refresh only active on Status screen
+
+   Display Layouts:
+
+   MENU SCREEN:
+   ============================================================
+                     TRAIN CONTROLLER MENU
+   ============================================================
+
+     1. View Status
+     2. Send Command
+     3. Exit
+
+   ============================================================
+
+   STATUS SCREEN:
    ============================================================
                     RAILWAY CONTROLLER STATUS
    ============================================================
@@ -116,6 +144,19 @@ FILES OVERVIEW
    Last Sent     : [HH:MM:SS] [TYPE] -> [DEST]
    Last Received : [HH:MM:SS] [TYPE] <- [SRC]
    Active Faults : [count]
+   ============================================================
+
+   COMMAND SCREEN:
+   ============================================================
+                      COMMAND INPUT
+   ============================================================
+
+     Available commands:
+       send-central  - Send test message to Central
+       send-local    - Send test message to Local
+
+     Press q + Enter to return to main menu
+
    ============================================================
 
 ================================================================================

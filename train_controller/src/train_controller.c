@@ -185,15 +185,21 @@ static void *ui_refresh_thread(void *arg)
 
     while (1)
     {
-        // Check both old state flag and new UI module flag
-        pthread_mutex_lock(&state.mutex);
-        int needs_update = state.ui_needs_update;
-        state.ui_needs_update = 0;
-        pthread_mutex_unlock(&state.mutex);
+        // Only auto-refresh when on status screen
+        ui_screen_t current = train_ui_get_screen(&ui_state);
 
-        if (needs_update || train_ui_needs_update(&ui_state))
+        if (current == UI_SCREEN_STATUS)
         {
-            display_ui();
+            // Check both old state flag and new UI module flag
+            pthread_mutex_lock(&state.mutex);
+            int needs_update = state.ui_needs_update;
+            state.ui_needs_update = 0;
+            pthread_mutex_unlock(&state.mutex);
+
+            if (needs_update || train_ui_needs_update(&ui_state))
+            {
+                display_ui();
+            }
         }
 
         sleep(UI_CHECK_INTERVAL);
@@ -387,32 +393,81 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    // Initial UI display
+    // Initial UI display (start with menu)
     display_ui();
 
-    // Main loop: read commands
-    char cmd[64];
-    while (1)
+    // Main loop: handle menu navigation
+    char input[64];
+    int running = 1;
+
+    while (running)
     {
-        if (fgets(cmd, sizeof(cmd), stdin) != NULL)
+        if (fgets(input, sizeof(input), stdin) != NULL)
         {
-            cmd[strcspn(cmd, "\n")] = '\0';
+            input[strcspn(input, "\n")] = '\0';
 
-            if (strlen(cmd) == 0)
-            {
-                display_ui();
-                continue;
-            }
+            ui_screen_t current = train_ui_get_screen(&ui_state);
 
-            if (strcmp(cmd, "quit") == 0 || strcmp(cmd, "exit") == 0)
+            switch (current)
             {
-                printf("Exiting...\n");
+            case UI_SCREEN_MENU:
+                if (strcmp(input, "1") == 0)
+                {
+                    train_ui_set_screen(&ui_state, UI_SCREEN_STATUS);
+                    display_ui();
+                }
+                else if (strcmp(input, "2") == 0)
+                {
+                    train_ui_set_screen(&ui_state, UI_SCREEN_COMMAND);
+                    display_ui();
+                }
+                else if (strcmp(input, "3") == 0 || strcmp(input, "quit") == 0 || strcmp(input, "exit") == 0)
+                {
+                    printf("Exiting...\n");
+                    running = 0;
+                }
+                else if (strlen(input) > 0)
+                {
+                    printf("%sInvalid option. Press Enter to continue.%s", COLOR_RED, COLOR_RESET);
+                    fflush(stdout);
+                }
+                else
+                {
+                    display_ui();
+                }
+                break;
+
+            case UI_SCREEN_STATUS:
+                if (strcmp(input, "q") == 0 || strcmp(input, "Q") == 0)
+                {
+                    train_ui_set_screen(&ui_state, UI_SCREEN_MENU);
+                    display_ui();
+                }
+                else
+                {
+                    // Refresh status on any other input (including empty)
+                    display_ui();
+                }
+                break;
+
+            case UI_SCREEN_COMMAND:
+                if (strcmp(input, "q") == 0 || strcmp(input, "Q") == 0)
+                {
+                    train_ui_set_screen(&ui_state, UI_SCREEN_MENU);
+                    display_ui();
+                }
+                else if (strlen(input) > 0)
+                {
+                    execute_command(input);
+                    sleep(1);
+                    display_ui();
+                }
+                else
+                {
+                    display_ui();
+                }
                 break;
             }
-
-            execute_command(cmd);
-            sleep(1);
-            display_ui();
         }
     }
 

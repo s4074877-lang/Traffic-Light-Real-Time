@@ -5,6 +5,13 @@
 #include <stdint.h>
 #include "../../../common/protocol.h"
 
+// UI Screen/View mode
+typedef enum {
+    UI_SCREEN_MENU = 0,     // Main menu
+    UI_SCREEN_STATUS,       // Status display
+    UI_SCREEN_COMMAND       // Command input mode
+} ui_screen_t;
+
 // Track direction for crossing
 typedef enum {
     TRACK_UP = 0,   // W->S direction
@@ -91,6 +98,9 @@ typedef struct {
     message_info_t last_received;
     int active_faults;
 
+    // Current screen
+    ui_screen_t current_screen;
+
     // Update flag
     int needs_update;
 
@@ -104,8 +114,23 @@ void train_ui_init(train_ui_state_t *ui);
 // Destroy UI state (cleanup mutex)
 void train_ui_destroy(train_ui_state_t *ui);
 
-// Display the UI (clears screen and redraws)
+// Display the current screen (menu, status, or command)
 void train_ui_display(train_ui_state_t *ui);
+
+// Display main menu
+void train_ui_display_menu(train_ui_state_t *ui);
+
+// Display status screen
+void train_ui_display_status(train_ui_state_t *ui);
+
+// Display command input screen
+void train_ui_display_command(train_ui_state_t *ui);
+
+// Set current screen (thread-safe)
+void train_ui_set_screen(train_ui_state_t *ui, ui_screen_t screen);
+
+// Get current screen (thread-safe)
+ui_screen_t train_ui_get_screen(train_ui_state_t *ui);
 
 // Mark UI as needing update (thread-safe)
 void train_ui_request_update(train_ui_state_t *ui);
