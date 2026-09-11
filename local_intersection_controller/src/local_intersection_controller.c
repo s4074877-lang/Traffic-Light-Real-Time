@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <errno.h>
+#include <time.h>
 
 #include "../../common/common.h"
 #include "../../common/communication/connection.h"
@@ -27,12 +28,40 @@ typedef struct {
 
     // Flags
     int ui_needs_update;
+    int stopping;
+    int central_heartbeat_misses;
+    int train_heartbeat_misses;
 
     pthread_mutex_t mutex;
+    pthread_cond_t wakeup;
 } local_state_t;
 
 static local_state_t state;
 static name_attach_t *attach = NULL;
+
+static int wait_for_stop(unsigned seconds) {
+    struct timespec deadline;
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+    deadline.tv_sec += seconds;
+
+    pthread_mutex_lock(&state.mutex);
+    while (!state.stopping && seconds != 0) {
+        int result = pthread_cond_timedwait(&state.wakeup, &state.mutex, &deadline);
+        if (result != 0) {
+            break;
+        }
+    }
+    int stopping = state.stopping;
+    pthread_mutex_unlock(&state.mutex);
+    return stopping;
+}
+
+static int try_connect(connection_t *conn) {
+    pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+    int connected = connection_try_connect(conn);
+    pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
+    return connected;
+}
 
 static void print_usage(const char *prog) {
     printf("Usage: %s [-l | -g]\n", prog);
@@ -81,7 +110,7 @@ static void display_ui(void) {
            state.last_send_train[0] ? state.last_send_train : "N/A");
 
     printf("%s========================================================%s\n", COLOR_BOLD, COLOR_RESET);
-    printf("Message send: send-central | send-train\n");
+    printf("Commands: send-central | send-train | status | quit\n");
     printf("%s========================================================%s\n", COLOR_BOLD, COLOR_RESET);
     printf("\n%sMessage:%s ", COLOR_BOLD, COLOR_RESET);
     fflush(stdout);
@@ -91,7 +120,7 @@ static void display_ui(void) {
 }
 
 // Handler for test messages
-static int handle_test_message(int rcvid, test_message_t *msg, reply_t *reply, void *ctx) {
+static int handle_test_message(int rcvid, any_msg_t *msg, reply_t *reply, void *ctx) {
     (void)rcvid;
     local_state_t *s = (local_state_t *)ctx;
 
@@ -99,9 +128,11 @@ static int handle_test_message(int rcvid, test_message_t *msg, reply_t *reply, v
 
     if (msg->header.src == CONTROLLER_CENTRAL) {
         strncpy(s->last_recv_central, msg->header.timestamp, sizeof(s->last_recv_central) - 1);
+        s->last_recv_central[sizeof(s->last_recv_central) - 1] = '\0';
         get_timestamp(s->last_central_update, sizeof(s->last_central_update));
     } else if (msg->header.src == CONTROLLER_TRAIN) {
         strncpy(s->last_recv_train, msg->header.timestamp, sizeof(s->last_recv_train) - 1);
+        s->last_recv_train[sizeof(s->last_recv_train) - 1] = '\0';
         get_timestamp(s->last_train_update, sizeof(s->last_train_update));
     }
 
@@ -128,19 +159,22 @@ static void* message_handler_thread(void *arg) {
 // Thread to manage connections
 static void* connection_thread(void *arg) {
     (void)arg;
+    pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
 
-    while (1) {
+    while (!wait_for_stop(0)) {
         // Try connecting to central
-        if (connection_try_connect(&state.central_conn)) {
+        if (try_connect(&state.central_conn)) {
             pthread_mutex_lock(&state.mutex);
+            state.central_heartbeat_misses = 0;
             get_timestamp(state.last_central_update, sizeof(state.last_central_update));
             state.ui_needs_update = 1;
             pthread_mutex_unlock(&state.mutex);
         }
 
         // Try connecting to train
-        if (connection_try_connect(&state.train_conn)) {
+        if (try_connect(&state.train_conn)) {
             pthread_mutex_lock(&state.mutex);
+            state.train_heartbeat_misses = 0;
             get_timestamp(state.last_train_update, sizeof(state.last_train_update));
             state.ui_needs_update = 1;
             pthread_mutex_unlock(&state.mutex);
@@ -149,7 +183,9 @@ static void* connection_thread(void *arg) {
             send_test_message(&state.train_conn, CONTROLLER_LOCAL, CONTROLLER_TRAIN);
         }
 
-        sleep(2);
+        if (wait_for_stop(2)) {
+            break;
+        }
     }
 
     return NULL;
@@ -159,7 +195,7 @@ static void* connection_thread(void *arg) {
 static void* ui_refresh_thread(void *arg) {
     (void)arg;
 
-    while (1) {
+    while (!wait_for_stop(0)) {
         pthread_mutex_lock(&state.mutex);
         int needs_update = state.ui_needs_update;
         pthread_mutex_unlock(&state.mutex);
@@ -168,38 +204,56 @@ static void* ui_refresh_thread(void *arg) {
             display_ui();
         }
 
-        sleep(UI_CHECK_INTERVAL);
+        if (wait_for_stop(UI_CHECK_INTERVAL)) {
+            break;
+        }
     }
 
     return NULL;
 }
 
 // Thread to check connection health via heartbeat
+static void check_heartbeat(connection_t *conn, controller_type_t peer,
+                            int *misses, char *last_update, size_t update_size) {
+    if (!connection_is_connected(conn)) {
+        return;
+    }
+
+    uint64_t generation = connection_generation(conn);
+    int result = send_heartbeat(conn, CONTROLLER_LOCAL, peer);
+    int close_connection = 0;
+
+    pthread_mutex_lock(&state.mutex);
+    if (conn->connected && conn->generation == generation) {
+        if (result == SEND_OK || result == SEND_REJECTED) {
+            *misses = 0;
+            get_timestamp(last_update, update_size);
+        } else if (*misses < HEARTBEAT_MISS_THRESHOLD) {
+            (*misses)++;
+        }
+        close_connection = *misses >= HEARTBEAT_MISS_THRESHOLD;
+        state.ui_needs_update = 1;
+    }
+    pthread_mutex_unlock(&state.mutex);
+
+    if (close_connection) {
+        connection_close_generation(conn, generation);
+        pthread_mutex_lock(&state.mutex);
+        state.ui_needs_update = 1;
+        pthread_mutex_unlock(&state.mutex);
+    }
+}
+
 static void* heartbeat_thread(void *arg) {
     (void)arg;
 
-    while (1) {
-        sleep(HEARTBEAT_INTERVAL);
-
-        // Check central connection
-        if (connection_is_connected(&state.central_conn)) {
-            if (send_heartbeat(&state.central_conn, CONTROLLER_LOCAL, CONTROLLER_CENTRAL) != 0) {
-                pthread_mutex_lock(&state.mutex);
-                get_timestamp(state.last_central_update, sizeof(state.last_central_update));
-                state.ui_needs_update = 1;
-                pthread_mutex_unlock(&state.mutex);
-            }
-        }
-
-        // Check train connection
-        if (connection_is_connected(&state.train_conn)) {
-            if (send_heartbeat(&state.train_conn, CONTROLLER_LOCAL, CONTROLLER_TRAIN) != 0) {
-                pthread_mutex_lock(&state.mutex);
-                get_timestamp(state.last_train_update, sizeof(state.last_train_update));
-                state.ui_needs_update = 1;
-                pthread_mutex_unlock(&state.mutex);
-            }
-        }
+    while (!wait_for_stop(HEARTBEAT_INTERVAL)) {
+        check_heartbeat(&state.central_conn, CONTROLLER_CENTRAL,
+                        &state.central_heartbeat_misses, state.last_central_update,
+                        sizeof(state.last_central_update));
+        check_heartbeat(&state.train_conn, CONTROLLER_TRAIN,
+                        &state.train_heartbeat_misses, state.last_train_update,
+                        sizeof(state.last_train_update));
     }
 
     return NULL;
@@ -207,7 +261,10 @@ static void* heartbeat_thread(void *arg) {
 
 // Execute command
 static int execute_command(const char *cmd) {
-    if (strcmp(cmd, "send-central") == 0) {
+    if (strcmp(cmd, "status") == 0) {
+        display_ui();
+        return 0;
+    } else if (strcmp(cmd, "send-central") == 0) {
         pthread_mutex_lock(&state.mutex);
         int connected = state.central_conn.connected;
         pthread_mutex_unlock(&state.mutex);
@@ -246,7 +303,7 @@ static int execute_command(const char *cmd) {
             return -1;
         }
     } else {
-        printf("%sUnknown command. Use: send-central | send-train%s\n", COLOR_RED, COLOR_RESET);
+        printf("%sUnknown command. Use: send-central | send-train | status | quit%s\n", COLOR_RED, COLOR_RESET);
         return -1;
     }
 
@@ -254,9 +311,6 @@ static int execute_command(const char *cmd) {
 }
 
 int main(int argc, char *argv[]) {
-    // Parse command line arguments
-    connection_mode_t mode = connection_parse_args(argc, argv);
-
     // Check for help
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -264,10 +318,30 @@ int main(int argc, char *argv[]) {
             return EXIT_SUCCESS;
         }
     }
+    connection_mode_t mode = connection_parse_args(argc, argv);
 
     // Initialize state
     memset(&state, 0, sizeof(state));
-    pthread_mutex_init(&state.mutex, NULL);
+    if (pthread_mutex_init(&state.mutex, NULL) != 0) {
+        fprintf(stderr, "Failed to initialize controller mutex\n");
+        return EXIT_FAILURE;
+    }
+    pthread_condattr_t attributes;
+    int result = pthread_condattr_init(&attributes);
+    if (result != 0) {
+        pthread_mutex_destroy(&state.mutex);
+        return EXIT_FAILURE;
+    }
+    result = pthread_condattr_setclock(&attributes, CLOCK_MONOTONIC);
+    if (result == 0) {
+        result = pthread_cond_init(&state.wakeup, &attributes);
+    }
+    pthread_condattr_destroy(&attributes);
+    if (result != 0) {
+        fprintf(stderr, "Failed to initialize controller condition: %s\n", strerror(result));
+        pthread_mutex_destroy(&state.mutex);
+        return EXIT_FAILURE;
+    }
     state.mode = mode;
     state.ui_needs_update = 1;
     connection_init(&state.central_conn, CENTRAL_SERVICE_NAME, mode, &state.mutex);
@@ -276,35 +350,34 @@ int main(int argc, char *argv[]) {
     // Register with name service
     attach = connection_register_service(LOCAL_SERVICE_NAME, mode);
     if (attach == NULL) {
+        connection_destroy(&state.central_conn);
+        connection_destroy(&state.train_conn);
+        pthread_cond_destroy(&state.wakeup);
+        pthread_mutex_destroy(&state.mutex);
         return EXIT_FAILURE;
     }
 
     // Initialize receive context
     receive_context_t recv_ctx;
     receive_init(&recv_ctx, attach, handlers,
-                 sizeof(handlers) / sizeof(handlers[0]), &state);
+                 sizeof(handlers) / sizeof(handlers[0]), &state, CONTROLLER_LOCAL);
 
     // Start threads
-    pthread_t msg_thread, conn_thread, ui_thread, hb_thread;
-
-    if (pthread_create(&msg_thread, NULL, message_handler_thread, &recv_ctx) != 0) {
-        fprintf(stderr, "Failed to create message handler thread\n");
-        return EXIT_FAILURE;
-    }
-
-    if (pthread_create(&conn_thread, NULL, connection_thread, NULL) != 0) {
-        fprintf(stderr, "Failed to create connection thread\n");
-        return EXIT_FAILURE;
-    }
-
-    if (pthread_create(&ui_thread, NULL, ui_refresh_thread, NULL) != 0) {
-        fprintf(stderr, "Failed to create UI thread\n");
-        return EXIT_FAILURE;
-    }
-
-    if (pthread_create(&hb_thread, NULL, heartbeat_thread, NULL) != 0) {
-        fprintf(stderr, "Failed to create heartbeat thread\n");
-        return EXIT_FAILURE;
+    pthread_t workers[4];
+    void *(*worker_functions[])(void *) = {
+        message_handler_thread, connection_thread, ui_refresh_thread, heartbeat_thread
+    };
+    const char *worker_names[] = { "message handler", "connection", "UI", "heartbeat" };
+    size_t started = 0;
+    int exit_status = EXIT_FAILURE;
+    for (size_t i = 0; i < sizeof(workers) / sizeof(workers[0]); i++) {
+        result = pthread_create(&workers[i], NULL, worker_functions[i],
+                                i == 0 ? &recv_ctx : NULL);
+        if (result != 0) {
+            fprintf(stderr, "Failed to create %s thread: %s\n", worker_names[i], strerror(result));
+            goto cleanup;
+        }
+        started++;
     }
 
     // Initial UI display
@@ -312,30 +385,42 @@ int main(int argc, char *argv[]) {
 
     // Main loop: read commands
     char cmd[64];
-    while (1) {
-        if (fgets(cmd, sizeof(cmd), stdin) != NULL) {
-            cmd[strcspn(cmd, "\n")] = '\0';
+    while (fgets(cmd, sizeof(cmd), stdin) != NULL) {
+        cmd[strcspn(cmd, "\r\n")] = '\0';
 
-            if (strlen(cmd) == 0) {
-                display_ui();
-                continue;
-            }
-
-            if (strcmp(cmd, "quit") == 0 || strcmp(cmd, "exit") == 0) {
-                printf("Exiting...\n");
-                break;
-            }
-
-            execute_command(cmd);
-            sleep(1);
+        if (cmd[0] == '\0') {
             display_ui();
+            continue;
         }
-    }
 
-    // Cleanup
-    connection_close(&state.central_conn);
-    connection_close(&state.train_conn);
+        if (strcmp(cmd, "quit") == 0 || strcmp(cmd, "exit") == 0) {
+            printf("Exiting...\n");
+            break;
+        }
+
+        execute_command(cmd);
+        wait_for_stop(1);
+        display_ui();
+    }
+    exit_status = ferror(stdin) ? EXIT_FAILURE : EXIT_SUCCESS;
+
+cleanup:
+    pthread_mutex_lock(&state.mutex);
+    state.stopping = 1;
+    pthread_cond_broadcast(&state.wakeup);
+    pthread_mutex_unlock(&state.mutex);
+    receive_stop(&recv_ctx);
+    if (started > 1) {
+        pthread_cancel(workers[1]);
+    }
+    for (size_t i = 0; i < started; i++) {
+        pthread_join(workers[i], NULL);
+    }
+    receive_destroy(&recv_ctx);
+    connection_destroy(&state.central_conn);
+    connection_destroy(&state.train_conn);
     connection_unregister_service(attach);
+    pthread_cond_destroy(&state.wakeup);
     pthread_mutex_destroy(&state.mutex);
-    return EXIT_SUCCESS;
+    return exit_status;
 }

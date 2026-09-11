@@ -2,9 +2,11 @@
 #define PROTOCOL_H
 
 #include <stdint.h>
+#include <stddef.h>
+#include <string.h>
 
 // Protocol version
-#define PROTOCOL_VERSION 1
+#define PROTOCOL_VERSION 2
 
 // ============================================
 // System configuration
@@ -33,6 +35,8 @@
 #define HEARTBEAT_PERIOD_SEC 1
 #define HEARTBEAT_MISS_LIMIT 3  // 3 misses = link down
 #define RAILWAY_RECOVERY_SEC 2  // hold red after TRAIN_CLEAR
+#define NORMAL_CYCLE_SEC (2 * (GREEN_BASE_SEC + YELLOW_SEC))
+#define CONTROLLER_NODE_ID 0xFF
 
 // ============================================
 // Message routing
@@ -42,8 +46,9 @@
 //   -------------------------------------------------------------
 //   MSG_MODE_COMMAND     Central   Local      mode_cmd_msg_t
 //   MSG_COORDINATION_COMMAND Central Local    coordination_command_msg_t
-//   MSG_OVERRIDE_REQUEST Local     Central    override_request_msg_t
-//   MSG_DISPLAY_UPDATE   Central   Local      display_update_msg_t
+//   MSG_OVERRIDE_REQUEST Central   Local      override_request_msg_t
+//   MSG_DISPLAY_UPDATE   Local     Local      display_update_msg_t
+//   MSG_STATUS_REQUEST   Central   Local/Train status_request_msg_t
 //
 //   MSG_STATUS_UPDATE    Local     Central    status_msg_t
 //   MSG_FAULT_ALERT      Local     Central    fault_msg_t
@@ -57,15 +62,15 @@
 //
 //   MSG_SENSOR_UPDATE    IO task   Local      sensor_msg_t   (internal)
 //   MSG_PED_REQUEST      IO task   Local      ped_msg_t      (internal)
-//   MSG_TEST             any       any        test_message_t (demo only)
+//   MSG_TEST             any       any        test_payload_t (demo only)
 //
-// Central never sends to Train. Train never sends a lamp command.
-// Local never sends to Local.
+// Central sends only health/status queries to Train, never gate commands.
+// Local display updates stay on the intersection node.
 
 // Message types
 typedef enum {
     MSG_TEST = 1,           // Any -> Any (test harness only)
-    MSG_HEARTBEAT = 2,      // Local/Train -> Central
+    MSG_HEARTBEAT = 2,      // Connected peers
     MSG_MODE_COMMAND = 3,   // Central -> Local
     MSG_STATUS_UPDATE = 4,  // Local -> Central
     MSG_FAULT_ALERT = 5,    // Local/Train -> Central
@@ -75,8 +80,9 @@ typedef enum {
     MSG_SENSOR_UPDATE = 9,  // IO task -> Local (same node)
     MSG_PED_REQUEST = 10,   // IO task -> Local (same node)
     MSG_COORDINATION_COMMAND = 11, // Central -> Local
-    MSG_OVERRIDE_REQUEST = 12,      // Local -> Central
-    MSG_DISPLAY_UPDATE = 13        // Central -> Local display
+    MSG_OVERRIDE_REQUEST = 12,     // Central -> Local
+    MSG_DISPLAY_UPDATE = 13,       // Local core -> Local display
+    MSG_STATUS_REQUEST = 14        // Central -> Local/Train
 } msg_type_t;
 
 // Controller types
@@ -91,29 +97,19 @@ typedef struct {
     uint16_t type;          // msg_type_t
     uint16_t src;           // Source controller (controller_type_t)
     uint16_t dst;           // Destination controller (controller_type_t)
-    uint16_t reserved;      // Padding
+    uint16_t version;
+    uint16_t payload_size;
+    uint16_t reserved;
+    uint32_t session_id;    // Changes when the source restarts
+    uint32_t sequence;
     char timestamp[32];     // HH:MM:SS format
 } msg_header_t;
-
-// Test message payload
-typedef struct {
-    msg_header_t header;
-    char data[64];          // Optional message data
-} test_message_t;
-
-// Reply structure (returned by MsgReply for every message type)
-typedef struct {
-    int8_t status;          // 0 = success, -1 = error
-    char timestamp[32];     // Reply timestamp
-    uint16_t command_id;    // Echo of mode_cmd_msg_t.command_id, else 0
-} reply_t;
-
 
 // ============================================
 // Central Controller Details
 // ============================================
 // Central only supervises: it receives STATUS_UPDATE / FAULT_ALERT /
-// RAILWAY_STATUS / HEARTBEAT, and sends MODE_COMMAND.
+// RAILWAY_STATUS / HEARTBEAT, and sends supervisory requests.
 // It never commands an individual lamp colour.
 
 typedef enum {
@@ -126,6 +122,8 @@ typedef struct {
     uint8_t sender_id;      // Intersection or crossing ID
     uint8_t healthy;        // 1 = OK, 0 = degraded
     uint16_t sequence;      // Increments each heartbeat
+    uint8_t mode;           // traffic_light_mode, when sender is Local
+    uint8_t reserved[3];
 } heartbeat_msg_t;
 
 
@@ -218,6 +216,14 @@ typedef enum { // Fault severity
     SEV_CRITICAL = 3
 } fault_severity_t;
 
+typedef enum {
+    COMMAND_NONE = 0,
+    COMMAND_QUEUED = 1,
+    COMMAND_APPLIED = 2,
+    COMMAND_REJECTED = 3,
+    COMMAND_EXPIRED = 4
+} command_state_t;
+
 
 typedef struct { // Intersection status payload (for MSG_STATUS_UPDATE)
     uint8_t intersection_id;    // Which intersection
@@ -229,6 +235,11 @@ typedef struct { // Intersection status payload (for MSG_STATUS_UPDATE)
     uint8_t pedestrian_ew;      // Pedestrian E-W crossing active
     uint8_t railway_preempt;    // 1 = railway preemption active
     uint16_t time_remaining;    // Seconds until next change
+    uint16_t command_id;        // Most recent command reported by Local
+    uint8_t command_state;      // command_state_t
+    uint8_t pedestrian_pending; // Bit 0 = NS, bit 1 = EW
+    uint16_t dropped_records;   // Status history lost during an outage
+    uint32_t command_session_id; // Central session that issued command_id
 } status_msg_t;
 
 // Fault alert payload (for MSG_FAULT_ALERT)
@@ -298,12 +309,12 @@ typedef struct {
 
 // Override request payload (for MSG_OVERRIDE_REQUEST)
 typedef struct {
-    uint8_t source_id;          // Intersection or crossing requesting override
-    uint8_t requested_mode;     // traffic_light_mode
-    uint8_t reason;             // fault_type_t or implementation-defined reason
+    uint8_t intersection_id;
+    uint8_t phase;              // Requested legal vehicle phase
+    uint8_t action;             // CMD_TEMPORARY or CMD_REVERT
     uint8_t reserved;
     uint16_t duration_sec;
-    uint16_t request_id;
+    uint16_t command_id;
 } override_request_msg_t;
 
 // Display update payload (for MSG_DISPLAY_UPDATE)
@@ -320,13 +331,20 @@ typedef struct {
 } display_update_msg_t;
 
 // ============================================
-// Receive buffer
+// Message envelope
 // ============================================
-// Use this as the MsgReceive() buffer, then switch on msg.header.type
+typedef struct {
+    uint8_t target_id;
+    uint8_t reserved;
+    uint16_t request_id;
+} status_request_msg_t;
+
+typedef struct {
+    char data[64];
+} test_payload_t;
 
 typedef union {
-    msg_header_t        header;
-    test_message_t      test;
+    test_payload_t     test;
     heartbeat_msg_t     heartbeat;
     status_msg_t        status;
     fault_msg_t         fault;
@@ -338,6 +356,189 @@ typedef union {
     coordination_command_msg_t coordination;
     override_request_msg_t override_request;
     display_update_msg_t display_update;
+    status_request_msg_t status_request;
+} message_payload_t;
+
+typedef struct {
+    msg_header_t header;
+    message_payload_t payload;
 } any_msg_t;
+
+typedef enum {
+    REPLY_REJECTED = -1,
+    REPLY_ACCEPTED = 0,
+    REPLY_APPLIED = 1
+} reply_status_t;
+
+typedef struct {
+    int16_t status;
+    uint16_t command_id;
+    uint16_t type;              // 0 for ACK, status type for a snapshot
+    uint16_t reserved;
+    char timestamp[32];
+    uint32_t session_id;
+    uint32_t sequence;
+    union {
+        status_msg_t status;
+        railway_status_msg_t railway_status;
+    } payload;
+} reply_t;
+
+static inline size_t protocol_payload_size(uint16_t type) {
+    switch (type) {
+        case MSG_TEST: return sizeof(test_payload_t);
+        case MSG_HEARTBEAT: return sizeof(heartbeat_msg_t);
+        case MSG_MODE_COMMAND: return sizeof(mode_cmd_msg_t);
+        case MSG_STATUS_UPDATE: return sizeof(status_msg_t);
+        case MSG_FAULT_ALERT: return sizeof(fault_msg_t);
+        case MSG_RAILWAY_PREEMPT:
+        case MSG_TRAIN_CLEAR: return sizeof(railway_msg_t);
+        case MSG_RAILWAY_STATUS: return sizeof(railway_status_msg_t);
+        case MSG_SENSOR_UPDATE: return sizeof(sensor_msg_t);
+        case MSG_PED_REQUEST: return sizeof(ped_msg_t);
+        case MSG_COORDINATION_COMMAND: return sizeof(coordination_command_msg_t);
+        case MSG_OVERRIDE_REQUEST: return sizeof(override_request_msg_t);
+        case MSG_DISPLAY_UPDATE: return sizeof(display_update_msg_t);
+        case MSG_STATUS_REQUEST: return sizeof(status_request_msg_t);
+        default: return 0;
+    }
+}
+
+static inline size_t protocol_message_size(const any_msg_t *msg) {
+    return offsetof(any_msg_t, payload) + protocol_payload_size(msg->header.type);
+}
+
+static inline void protocol_init_message(any_msg_t *msg, msg_type_t type,
+                                         controller_type_t src, controller_type_t dst) {
+    memset(msg, 0, sizeof(*msg));
+    msg->header.type = (uint16_t)type;
+    msg->header.src = (uint16_t)src;
+    msg->header.dst = (uint16_t)dst;
+    msg->header.version = PROTOCOL_VERSION;
+    msg->header.payload_size = (uint16_t)protocol_payload_size(type);
+}
+
+static inline uint16_t protocol_command_id(const any_msg_t *msg) {
+    switch (msg->header.type) {
+        case MSG_MODE_COMMAND: return msg->payload.mode_cmd.command_id;
+        case MSG_COORDINATION_COMMAND: return msg->payload.coordination.command_id;
+        case MSG_OVERRIDE_REQUEST: return msg->payload.override_request.command_id;
+        case MSG_STATUS_REQUEST: return msg->payload.status_request.request_id;
+        default: return 0;
+    }
+}
+
+static inline int protocol_valid_target(uint8_t id) {
+    return id < NUM_INTERSECTIONS || id == INTERSECTION_ALL;
+}
+
+static inline int protocol_valid_status(const status_msg_t *s) {
+    return s->intersection_id < NUM_INTERSECTIONS && s->mode <= MODE_FAILSAFE &&
+           s->phase <= PHASE_RAILWAY_HOLD && s->ns_state <= LIGHT_GREEN &&
+           s->ew_state <= LIGHT_GREEN && s->pedestrian_ns <= 1 &&
+           s->pedestrian_ew <= 1 && s->railway_preempt <= 1 &&
+           s->command_state <= COMMAND_EXPIRED && s->pedestrian_pending <= 3;
+}
+
+static inline int protocol_valid_railway_status(const railway_status_msg_t *s) {
+    return s->crossing_id < NUM_CROSSINGS && s->train_state <= TRAIN_CLEAR &&
+           s->gate_state <= GATE_FAULT && s->fault <= FAULT_NOT_WORKING;
+}
+
+static inline int protocol_validate_message(const any_msg_t *msg, size_t size,
+                                            controller_type_t self) {
+    size_t payload_size;
+    uint16_t src, dst;
+    if (size < offsetof(any_msg_t, payload)) return 0;
+    payload_size = protocol_payload_size(msg->header.type);
+    src = msg->header.src;
+    dst = msg->header.dst;
+    if (!payload_size || msg->header.version != PROTOCOL_VERSION ||
+        msg->header.payload_size != payload_size ||
+        size != offsetof(any_msg_t, payload) + payload_size ||
+        dst != (uint16_t)self || src < CONTROLLER_LOCAL || src > CONTROLLER_CENTRAL ||
+        dst < CONTROLLER_LOCAL || dst > CONTROLLER_CENTRAL || msg->header.reserved != 0)
+        return 0;
+
+    switch (msg->header.type) {
+        case MSG_TEST: return 1;
+        case MSG_HEARTBEAT: {
+            const heartbeat_msg_t *h = &msg->payload.heartbeat;
+            unsigned limit = src == CONTROLLER_LOCAL ? NUM_INTERSECTIONS : NUM_CROSSINGS;
+            return h->healthy <= 1 && h->mode <= MODE_FAILSAFE &&
+                   (h->sender_id == CONTROLLER_NODE_ID ||
+                    (src != CONTROLLER_CENTRAL && h->sender_id < limit));
+        }
+        case MSG_MODE_COMMAND: {
+            const mode_cmd_msg_t *c = &msg->payload.mode_cmd;
+            return src == CONTROLLER_CENTRAL && dst == CONTROLLER_LOCAL &&
+                   protocol_valid_target(c->intersection_id) && c->new_mode <= MODE_SENSOR &&
+                   c->action <= CMD_REVERT && c->command_id != 0 &&
+                   (c->priority == CMD_PRIO_OPERATOR || c->priority == CMD_PRIO_SCHEDULE) &&
+                   ((c->action == CMD_TEMPORARY && c->duration_sec > 0) ||
+                    (c->action != CMD_TEMPORARY && c->duration_sec == 0));
+        }
+        case MSG_STATUS_UPDATE:
+            return src == CONTROLLER_LOCAL && dst == CONTROLLER_CENTRAL &&
+                   protocol_valid_status(&msg->payload.status);
+        case MSG_RAILWAY_STATUS:
+            return src == CONTROLLER_TRAIN &&
+                   (dst == CONTROLLER_CENTRAL || dst == CONTROLLER_LOCAL) &&
+                   protocol_valid_railway_status(&msg->payload.railway_status);
+        case MSG_FAULT_ALERT: {
+            const fault_msg_t *f = &msg->payload.fault;
+            return (src == CONTROLLER_LOCAL || src == CONTROLLER_TRAIN) &&
+                   dst == CONTROLLER_CENTRAL &&
+                   f->source_id < (src == CONTROLLER_LOCAL ? NUM_INTERSECTIONS : NUM_CROSSINGS) &&
+                   f->fault_type <= FAULT_NOT_WORKING &&
+                   f->severity >= SEV_LOW && f->severity <= SEV_CRITICAL;
+        }
+        case MSG_RAILWAY_PREEMPT:
+        case MSG_TRAIN_CLEAR:
+            return src == CONTROLLER_TRAIN && dst == CONTROLLER_LOCAL &&
+                   msg->payload.railway.intersection_id < NUM_INTERSECTIONS &&
+                   msg->payload.railway.active == (msg->header.type == MSG_RAILWAY_PREEMPT);
+        case MSG_SENSOR_UPDATE:
+            return src == CONTROLLER_LOCAL && dst == CONTROLLER_LOCAL &&
+                   msg->payload.sensor.intersection_id < NUM_INTERSECTIONS &&
+                   msg->payload.sensor.direction <= DIR_EW;
+        case MSG_PED_REQUEST:
+            return src == CONTROLLER_LOCAL && dst == CONTROLLER_LOCAL &&
+                   msg->payload.ped.intersection_id < NUM_INTERSECTIONS &&
+                   msg->payload.ped.direction <= DIR_EW && msg->payload.ped.pressed <= 1;
+        case MSG_COORDINATION_COMMAND: {
+            const coordination_command_msg_t *c = &msg->payload.coordination;
+            return src == CONTROLLER_CENTRAL && dst == CONTROLLER_LOCAL &&
+                   protocol_valid_target(c->intersection_id) && c->mode <= MODE_SENSOR &&
+                   (c->phase == PHASE_NS_GREEN || c->phase == PHASE_EW_GREEN) &&
+                   c->cycle_offset_sec < NORMAL_CYCLE_SEC && c->command_id != 0;
+        }
+        case MSG_OVERRIDE_REQUEST: {
+            const override_request_msg_t *c = &msg->payload.override_request;
+            return src == CONTROLLER_CENTRAL && dst == CONTROLLER_LOCAL &&
+                   protocol_valid_target(c->intersection_id) && c->command_id != 0 &&
+                   (c->phase == PHASE_NS_GREEN || c->phase == PHASE_EW_GREEN) &&
+                   ((c->action == CMD_TEMPORARY && c->duration_sec > 0) ||
+                    (c->action == CMD_REVERT && c->duration_sec == 0));
+        }
+        case MSG_DISPLAY_UPDATE:
+            return src == CONTROLLER_LOCAL && dst == CONTROLLER_LOCAL &&
+                   msg->payload.display_update.intersection_id < NUM_INTERSECTIONS &&
+                   msg->payload.display_update.mode <= MODE_FAILSAFE &&
+                   msg->payload.display_update.phase <= PHASE_RAILWAY_HOLD &&
+                   msg->payload.display_update.ns_state <= LIGHT_GREEN &&
+                   msg->payload.display_update.ew_state <= LIGHT_GREEN &&
+                   msg->payload.display_update.pedestrian_ns <= 1 &&
+                   msg->payload.display_update.pedestrian_ew <= 1 &&
+                   msg->payload.display_update.railway_preempt <= 1;
+        case MSG_STATUS_REQUEST:
+            return src == CONTROLLER_CENTRAL &&
+                   (dst == CONTROLLER_LOCAL || dst == CONTROLLER_TRAIN) &&
+                   msg->payload.status_request.target_id <
+                       (dst == CONTROLLER_LOCAL ? NUM_INTERSECTIONS : NUM_CROSSINGS) &&
+                   msg->payload.status_request.request_id != 0;
+        default: return 0;
+    }
+}
 
 #endif // PROTOCOL_H

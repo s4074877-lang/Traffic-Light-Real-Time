@@ -80,4 +80,4 @@ clean:
 rebuild: clean all
 
 #Inclusion of dependencies (object files to source and includes)
--include $(OBJS:%.o=%.d)
+-include $(OBJS:%.o=%.d) $(COMM_OBJS:%.o=%.d)
