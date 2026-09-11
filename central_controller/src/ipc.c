@@ -158,6 +158,22 @@ static void free_link_state(central_link_state_t *state) {
     free(state);
 }
 
+static void prepare_reply(const test_message_t *request, reply_t *reply) {
+    uint16_t id = central_command_id(request);
+    const unsigned char *expected = (const unsigned char *)&id;
+    unsigned char *pending = (unsigned char *)&reply->command_id;
+    size_t i;
+    memset(reply, 0xa5, sizeof(*reply));
+    /* MsgSend returns the peer's status, not the reply length. Every untouched
+     * ID byte must differ from both the expected ID and a legacy zero-ID NACK,
+     * including when the command ID is UINT16_MAX. This also rejects a reply
+     * cut partway through the ID without assuming byte order. It cannot detect
+     * extra bytes or missing ABI padding after all reply fields were written. */
+    for (i = 0; i < sizeof(id); ++i) {
+        pending[i] = expected[i] == 0xa5 ? 0x5a : 0xa5;
+    }
+}
+
 static int validate_reply(const test_message_t *request, const reply_t *reply,
                            int kernel_status) {
     uint16_t id = central_command_id(request);
@@ -203,8 +219,7 @@ static void *link_worker(void *argument) {
         state->job = JOB_NONE;
         test_message_t request = state->request;
         reply_t reply;
-        memset(&reply, 0xa5, sizeof(reply));
-        reply.command_id = (uint16_t)(central_command_id(&request) ^ UINT16_MAX);
+        prepare_reply(&request, &reply);
         pthread_mutex_unlock(&state->mutex);
 
         int result = CENTRAL_SEND_TRANSPORT;

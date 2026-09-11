@@ -7,7 +7,7 @@ IPC_SOURCES = ../src/ipc.c ../src/commands.c
 IPC_HEADERS = ../src/ipc.h ../src/commands.h
 
 .PHONY: all run clean
-all: $(OUTPUT_DIR)/monitor_test $(OUTPUT_DIR)/commands_test $(OUTPUT_DIR)/ipc_test $(OUTPUT_DIR)/integration_test $(OUTPUT_DIR)/central_fixture
+all: $(OUTPUT_DIR)/monitor_test $(OUTPUT_DIR)/commands_test $(OUTPUT_DIR)/ipc_test $(OUTPUT_DIR)/integration_test $(OUTPUT_DIR)/central_fixture $(OUTPUT_DIR)/global_transport_test
 
 $(OUTPUT_DIR):
 	mkdir -p $@
@@ -24,6 +24,9 @@ $(OUTPUT_DIR)/ipc_test: ipc_test.c $(IPC_SOURCES) $(IPC_HEADERS) $(COMMON_HEADER
 $(OUTPUT_DIR)/integration_test: integration_test.c $(IPC_SOURCES) $(IPC_HEADERS) $(COMMON_HEADERS) | $(OUTPUT_DIR)
 	$(CC) $(CFLAGS) -o $@ integration_test.c $(IPC_SOURCES)
 
+$(OUTPUT_DIR)/global_transport_test: global_transport_test.c $(IPC_SOURCES) $(IPC_HEADERS) $(COMMON_HEADERS) | $(OUTPUT_DIR)
+	$(CC) $(CFLAGS) -o $@ global_transport_test.c $(IPC_SOURCES)
+
 $(OUTPUT_DIR)/central_fixture: ../src/central_controller.c ../src/monitor.c ../src/monitor.h $(IPC_SOURCES) $(IPC_HEADERS) $(COMMON_HEADERS) | $(OUTPUT_DIR)
 	$(CC) $(CFLAGS) -DCENTRAL_SERVICE=\"traffic_test_central_only\" -DCENTRAL_LOCAL_SERVICE=\"traffic_test_central_only_local\" -DCENTRAL_TRAIN_SERVICE=\"traffic_test_central_only_train\" -o $@ ../src/central_controller.c ../src/monitor.c $(IPC_SOURCES)
 
@@ -34,4 +37,4 @@ run: all
 	$(OUTPUT_DIR)/integration_test $(OUTPUT_DIR)/central_fixture
 
 clean:
-	rm -f $(OUTPUT_DIR)/monitor_test $(OUTPUT_DIR)/commands_test $(OUTPUT_DIR)/ipc_test $(OUTPUT_DIR)/integration_test $(OUTPUT_DIR)/central_fixture
+	rm -f $(OUTPUT_DIR)/monitor_test $(OUTPUT_DIR)/commands_test $(OUTPUT_DIR)/ipc_test $(OUTPUT_DIR)/integration_test $(OUTPUT_DIR)/central_fixture $(OUTPUT_DIR)/global_transport_test

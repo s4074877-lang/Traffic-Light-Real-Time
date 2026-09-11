@@ -1,7 +1,46 @@
 #include "monitor.h"
+#include <string.h>
+
+void central_monitor_init(central_monitor_t *m, unsigned max_age_seconds) {
+    if (m == NULL) return;
+    memset(m, 0, sizeof(*m));
+    m->status_max_age_ns = (max_age_seconds ? max_age_seconds : CENTRAL_STATUS_STALE_SEC) *
+                          CENTRAL_NSEC;
+}
+
+uint64_t central_monitor_status_max_age_ns(const central_monitor_t *m) {
+    return m != NULL && m->status_max_age_ns ? m->status_max_age_ns :
+           CENTRAL_STATUS_STALE_SEC * CENTRAL_NSEC;
+}
 
 int central_peer_index(controller_type_t source) {
     return source == CONTROLLER_LOCAL ? 0 : source == CONTROLLER_TRAIN ? 1 : -1;
+}
+
+int central_monitor_health(const central_monitor_t *m, controller_type_t source,
+                           unsigned sender_id) {
+    int index = central_peer_index(source);
+    unsigned count = source == CONTROLLER_TRAIN ? NUM_CROSSINGS : NUM_INTERSECTIONS;
+    if (m == NULL || index < 0 || sender_id >= count || !m->health[index][sender_id].seen)
+        return -1;
+    return m->health[index][sender_id].healthy;
+}
+
+int central_monitor_heartbeat(central_monitor_t *m, controller_type_t source,
+                              const heartbeat_msg_t *heartbeat, uint64_t now) {
+    int index = central_peer_index(source);
+    unsigned count = source == CONTROLLER_TRAIN ? NUM_CROSSINGS : NUM_INTERSECTIONS;
+    central_reported_health_t *health;
+    if (m == NULL || heartbeat == NULL || index < 0 || heartbeat->sender_id >= count ||
+        heartbeat->healthy > 1) return 0;
+    central_observe_peer(m, source, now);
+    if (heartbeat->sender_id == 0 && heartbeat->healthy == 0 && heartbeat->sequence == 0)
+        return 1;
+    health = &m->health[index][heartbeat->sender_id];
+    health->seen = 1;
+    health->healthy = heartbeat->healthy;
+    health->received_at = now;
+    return 1;
 }
 
 int central_peer_online(const central_monitor_t *m, controller_type_t source, uint64_t now) {
@@ -72,8 +111,9 @@ int central_monitor_railway(central_monitor_t *m, const railway_status_msg_t *s,
 int central_can_command(const central_monitor_t *m, unsigned target, uint64_t now) {
     const central_intersection_status_t *entry;
     if (target >= NUM_INTERSECTIONS || !m->peers[0].connected ||
-        !central_peer_online(m, CONTROLLER_LOCAL, now)) return 0;
+        !central_peer_online(m, CONTROLLER_LOCAL, now) ||
+        central_monitor_health(m, CONTROLLER_LOCAL, target) == 0) return 0;
     entry = &m->intersections[target];
     return entry->valid && entry->synchronized && now >= entry->received_at &&
-           now - entry->received_at < CENTRAL_STATUS_STALE_SEC * CENTRAL_NSEC;
+           now - entry->received_at < central_monitor_status_max_age_ns(m);
 }

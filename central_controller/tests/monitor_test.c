@@ -11,6 +11,136 @@ static unsigned checks;
     } \
 } while (0)
 
+static int check_configurable_freshness(void) {
+    static const unsigned ages[] = {1, 2, CENTRAL_STATUS_STALE_SEC, 60};
+    central_monitor_t monitor = {0};
+    status_msg_t status = {0};
+    uint64_t start = 200 * CENTRAL_NSEC;
+    unsigned i, second;
+
+    CHECK(central_monitor_status_max_age_ns(&monitor) ==
+          CENTRAL_STATUS_STALE_SEC * CENTRAL_NSEC);
+    central_monitor_init(&monitor, 0);
+    CHECK(monitor.status_max_age_ns == CENTRAL_STATUS_STALE_SEC * CENTRAL_NSEC);
+    for (i = 0; i < sizeof(ages) / sizeof(ages[0]); ++i) {
+        memset(&monitor, 0xa5, sizeof(monitor));
+        central_monitor_init(&monitor, ages[i]);
+        CHECK(central_monitor_status_max_age_ns(&monitor) == ages[i] * CENTRAL_NSEC);
+        CHECK(!monitor.peers[0].connected && !monitor.intersections[I1].valid);
+        CHECK(central_monitor_health(&monitor, CONTROLLER_LOCAL, I1) == -1);
+        monitor.peers[0].connected = 1;
+        CHECK(central_monitor_status(&monitor, &status, start));
+        CHECK(!central_can_command(&monitor, I1, start - 1));
+        for (second = 1; second < ages[i]; ++second)
+            central_observe_peer(&monitor, CONTROLLER_LOCAL, start + second * CENTRAL_NSEC);
+        CHECK(central_can_command(&monitor, I1, start + ages[i] * CENTRAL_NSEC - 1));
+        central_observe_peer(&monitor, CONTROLLER_LOCAL, start + ages[i] * CENTRAL_NSEC);
+        CHECK(central_peer_online(&monitor, CONTROLLER_LOCAL, start + ages[i] * CENTRAL_NSEC));
+        CHECK(!central_can_command(&monitor, I1, start + ages[i] * CENTRAL_NSEC));
+        CHECK(central_monitor_status(&monitor, &status, start + ages[i] * CENTRAL_NSEC));
+        CHECK(central_can_command(&monitor, I1, start + ages[i] * CENTRAL_NSEC));
+    }
+    return 0;
+}
+
+static int check_reported_health(void) {
+    central_monitor_t monitor, before;
+    heartbeat_msg_t heartbeat = {0}, legacy = {0};
+    status_msg_t status = {0};
+    uint64_t now = 300 * CENTRAL_NSEC;
+    uint64_t degraded_at;
+    unsigned i;
+
+    central_monitor_init(&monitor, 0);
+    monitor.peers[0].connected = 1;
+    for (i = 0; i < NUM_INTERSECTIONS; ++i) {
+        status.intersection_id = i;
+        CHECK(central_monitor_status(&monitor, &status, now));
+    }
+    CHECK(central_monitor_heartbeat(&monitor, CONTROLLER_LOCAL, &legacy, now));
+    CHECK(central_monitor_health(&monitor, CONTROLLER_LOCAL, I1) == -1);
+    CHECK(central_can_command(&monitor, I1, now));
+
+    now += CENTRAL_NSEC;
+    heartbeat.sender_id = I1;
+    heartbeat.healthy = 0;
+    heartbeat.sequence = 1;
+    CHECK(central_monitor_heartbeat(&monitor, CONTROLLER_LOCAL, &heartbeat, now));
+    degraded_at = now;
+    CHECK(central_peer_online(&monitor, CONTROLLER_LOCAL, now));
+    CHECK(central_monitor_health(&monitor, CONTROLLER_LOCAL, I1) == 0);
+    CHECK(!central_can_command(&monitor, I1, now));
+    CHECK(central_can_command(&monitor, I2, now));
+
+    now += CENTRAL_NSEC;
+    central_observe_peer(&monitor, CONTROLLER_LOCAL, now); /* Probe ACK is contact only. */
+    status.intersection_id = I1;
+    CHECK(central_monitor_status(&monitor, &status, now));
+    CHECK(central_monitor_heartbeat(&monitor, CONTROLLER_LOCAL, &legacy, now));
+    CHECK(central_monitor_health(&monitor, CONTROLLER_LOCAL, I1) == 0);
+    CHECK(monitor.health[0][I1].received_at == degraded_at);
+    CHECK(!central_can_command(&monitor, I1, now));
+    heartbeat.sender_id = I2;
+    heartbeat.healthy = 1;
+    heartbeat.sequence = 0;
+    CHECK(central_monitor_heartbeat(&monitor, CONTROLLER_LOCAL, &heartbeat, now));
+    CHECK(central_monitor_health(&monitor, CONTROLLER_LOCAL, I2) == 1);
+    CHECK(central_monitor_health(&monitor, CONTROLLER_LOCAL, I1) == 0);
+    CHECK(central_can_command(&monitor, I2, now));
+
+    heartbeat.sender_id = P1;
+    heartbeat.healthy = 0;
+    heartbeat.sequence = 1;
+    CHECK(central_monitor_heartbeat(&monitor, CONTROLLER_TRAIN, &heartbeat, now));
+    CHECK(central_monitor_heartbeat(&monitor, CONTROLLER_TRAIN, &legacy, now));
+    CHECK(central_monitor_health(&monitor, CONTROLLER_TRAIN, P1) == 0);
+    CHECK(central_can_command(&monitor, I2, now));
+    heartbeat.sender_id = I6;
+    heartbeat.sequence = 0; /* Nonzero IDs remain unambiguous even with sequence zero. */
+    CHECK(central_monitor_heartbeat(&monitor, CONTROLLER_LOCAL, &heartbeat, now));
+    CHECK(central_monitor_health(&monitor, CONTROLLER_LOCAL, I6) == 0);
+    CHECK(!central_can_command(&monitor, I6, now));
+
+    before = monitor;
+    CHECK(!central_monitor_heartbeat(&monitor, CONTROLLER_CENTRAL, &heartbeat, now));
+    CHECK(!central_monitor_heartbeat(&monitor, CONTROLLER_LOCAL, NULL, now));
+    CHECK(!central_monitor_heartbeat(NULL, CONTROLLER_LOCAL, &heartbeat, now));
+    heartbeat.sender_id = NUM_INTERSECTIONS;
+    CHECK(!central_monitor_heartbeat(&monitor, CONTROLLER_LOCAL, &heartbeat, now));
+    heartbeat.sender_id = NUM_CROSSINGS;
+    CHECK(!central_monitor_heartbeat(&monitor, CONTROLLER_TRAIN, &heartbeat, now));
+    heartbeat.sender_id = I1;
+    heartbeat.healthy = 2;
+    CHECK(!central_monitor_heartbeat(&monitor, CONTROLLER_LOCAL, &heartbeat, now));
+    CHECK(memcmp(&monitor, &before, sizeof(monitor)) == 0);
+    CHECK(central_monitor_health(&monitor, CONTROLLER_CENTRAL, 0) == -1);
+    CHECK(central_monitor_health(&monitor, CONTROLLER_LOCAL, NUM_INTERSECTIONS) == -1);
+    CHECK(central_monitor_health(&monitor, CONTROLLER_TRAIN, NUM_CROSSINGS) == -1);
+
+    central_peer_disconnected(&monitor, CONTROLLER_LOCAL);
+    CHECK(central_monitor_health(&monitor, CONTROLLER_LOCAL, I1) == 0);
+    monitor.peers[0].connected = 1;
+    CHECK(central_observe_peer(&monitor, CONTROLLER_LOCAL, now));
+    CHECK(central_monitor_status(&monitor, &status, now));
+    CHECK(!central_can_command(&monitor, I1, now));
+    heartbeat.healthy = 1;
+    heartbeat.sequence = 2;
+    CHECK(central_monitor_heartbeat(&monitor, CONTROLLER_LOCAL, &heartbeat, now));
+    CHECK(central_monitor_health(&monitor, CONTROLLER_LOCAL, I1) == 1);
+    CHECK(central_can_command(&monitor, I1, now));
+    CHECK(central_monitor_health(&monitor, CONTROLLER_LOCAL, I6) == 0);
+
+    now += HEARTBEAT_MISS_LIMIT * CENTRAL_NSEC;
+    CHECK(!central_peer_online(&monitor, CONTROLLER_LOCAL, now));
+    CHECK(central_monitor_heartbeat(&monitor, CONTROLLER_LOCAL, &heartbeat, now));
+    CHECK(central_peer_online(&monitor, CONTROLLER_LOCAL, now));
+    CHECK(!monitor.intersections[I1].synchronized);
+    CHECK(!central_can_command(&monitor, I1, now)); /* Healthy contact is not a fresh status. */
+    CHECK(central_monitor_status(&monitor, &status, now));
+    CHECK(central_can_command(&monitor, I1, now));
+    return 0;
+}
+
 int main(void) {
     central_monitor_t monitor = {0};
     central_monitor_t before;
@@ -145,6 +275,8 @@ int main(void) {
     CHECK(!central_observe_peer(&monitor, CONTROLLER_CENTRAL, start));
     CHECK(memcmp(&before, &monitor, sizeof(monitor)) == 0);
 
+    CHECK(check_configurable_freshness() == 0);
+    CHECK(check_reported_health() == 0);
     printf("monitor: %u checks passed\n", checks);
     return 0;
 }

@@ -1,5 +1,6 @@
 #include "../src/ipc.h"
 #include "../src/commands.h"
+#include <stddef.h>
 #include <signal.h>
 #include <sys/iomsg.h>
 #include <sys/wait.h>
@@ -7,6 +8,17 @@
 static unsigned checks;
 static pid_t servers[2] = {-1, -1};
 static int notice[2] = {-1, -1};
+
+/* Fixture controls live after the typed command in its unused data bytes. */
+typedef struct {
+    uint8_t active;
+    int8_t status;
+    uint16_t command_id;
+    uint32_t length;
+} reply_fixture_t;
+
+_Static_assert(sizeof(mode_cmd_msg_t) + sizeof(reply_fixture_t) <=
+               sizeof(((test_message_t *)0)->data), "reply fixture fits legacy frame");
 
 static void cleanup(void) {
     unsigned i;
@@ -56,6 +68,15 @@ static void legacy_server(const char *name, int ready_fd) {
         central_timestamp(reply.timestamp, sizeof(reply.timestamp));
         reply.command_id = central_command_id(&frame.message);
         if (frame.message.header.type == MSG_MODE_COMMAND) {
+            reply_fixture_t fixture;
+            memcpy(&fixture, frame.message.data + sizeof(mode_cmd_msg_t), sizeof(fixture));
+            if (fixture.active) {
+                if (fixture.length > sizeof(reply)) _exit(8);
+                reply.status = fixture.status;
+                reply.command_id = fixture.command_id;
+                MsgReply(rcvid, 0, &reply, fixture.length);
+                continue;
+            }
             if (reply.command_id == 99) { reply.status = -1; reply.command_id = 0; }
             if (reply.command_id == 100) reply.command_id = 101;
         }
@@ -119,6 +140,49 @@ static int raw_send(int coid, const void *message, size_t size, reply_t *reply) 
     return MsgSend(coid, message, size, reply, sizeof(*reply));
 }
 
+static void test_reply_prefixes(central_link_t *link) {
+    static const uint16_t ids[] = {1, 255, 256, 0xa5a5, 0xff00, UINT16_MAX};
+    const size_t fields_end = offsetof(reply_t, command_id) + sizeof(uint16_t);
+    test_message_t message;
+    reply_t reply;
+    unsigned target;
+    size_t i, length;
+    int outcome;
+    require(central_parse_command("mode-fixed I1", &message, &target),
+            "partial reply fixture parsed");
+    central_command_set_target(&message, I1);
+    central_timestamp(message.header.timestamp, sizeof(message.header.timestamp));
+    for (i = 0; i < sizeof(ids) / sizeof(ids[0]); ++i) {
+        central_command_set_id(&message, ids[i]);
+        for (outcome = 0; outcome < 3; ++outcome) {
+            reply_fixture_t fixture = {1, outcome == 0 ? 0 : -1,
+                                       outcome == 2 ? 0 : ids[i], 0};
+            char description[128];
+            for (length = 0; length < fields_end; ++length) {
+                fixture.length = (uint32_t)length;
+                memcpy(message.data + sizeof(mode_cmd_msg_t), &fixture, sizeof(fixture));
+                snprintf(description, sizeof(description),
+                         "partial %s ID %u: %zu bytes is a protocol error",
+                         outcome == 0 ? "ACK" : outcome == 1 ? "NACK" : "zero-ID NACK",
+                         (unsigned)ids[i], length);
+                require(central_send(link, &message, &reply) == CENTRAL_SEND_PROTOCOL &&
+                        errno == EPROTO, description);
+            }
+            fixture.length = sizeof(reply);
+            memcpy(message.data + sizeof(mode_cmd_msg_t), &fixture, sizeof(fixture));
+            snprintf(description, sizeof(description), "complete reply ID %u outcome %d",
+                     (unsigned)ids[i], outcome);
+            require(central_send(link, &message, &reply) ==
+                    (outcome == 0 ? CENTRAL_SEND_OK : CENTRAL_SEND_REJECTED), description);
+            require(reply.command_id == fixture.command_id && reply.status == fixture.status,
+                    "complete legacy reply fields preserved");
+        }
+    }
+    require(central_link_is_connected(link), "malformed replies preserve the transport");
+    require(central_send_heartbeat(link, CONTROLLER_LOCAL) == CENTRAL_SEND_OK,
+            "link remains usable after partial reply errors");
+}
+
 int main(void) {
     central_link_t local, train, receiver_link;
     central_receiver_t receiver;
@@ -164,6 +228,8 @@ int main(void) {
     require(central_send(&local, &message, &reply) == CENTRAL_SEND_OK,
             "matching command ID ACK");
     require(reply.command_id == 102, "reply payload remains ABI compatible");
+
+    test_reply_prefixes(&local);
 
     central_message_init(&message, MSG_TEST, CONTROLLER_CENTRAL, CONTROLLER_LOCAL);
     strcpy(message.data, "BAD_STATUS");
@@ -224,6 +290,7 @@ int main(void) {
     started = central_monotonic_ns();
     require(central_send(&local, &message, &reply) == CENTRAL_SEND_TRANSPORT,
             "busy timed-out worker does not replay command");
+    require(errno == EBUSY, "pending operation reports busy without queuing another send");
     require(central_monotonic_ns() - started < UINT64_C(1500000000), "busy worker bounded");
     started = central_monotonic_ns();
     central_link_close(&local);
