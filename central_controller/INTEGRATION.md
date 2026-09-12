@@ -1,171 +1,166 @@
-# Central integration contract and open decisions
+# Central integration contract
 
-This document describes the existing version 1 interface in `../common/protocol.h` and the Central-only integration boundary. It does not define new override/display behavior or change the shared ABI. Local and Train still need their real application handlers and target integration tests.
+This revision changes Central-owned code and documents only. It adapts to the existing shared protocol, Local skeleton and merged Train simulator; it does not change those teammates' files or establish that their state machines are complete. See [IMPLEMENTATION_NOTE.md](IMPLEMENTATION_NOTE.md) for architecture and assignment coverage, and [VALIDATION.md](VALIDATION.md) for measured evidence.
 
-## What can be integrated now
+## Ownership and assignment interpretation
 
-| Route | Message | Existing meaning |
+Central displays reported intersection and railway states and requests high-level operating patterns. Local owns individual lamp outputs, safe phase transitions, pedestrians, railway preemption, temporary-mode expiry and continued operation when Central disappears. Train owns crossing gates, train approach signals and their safety decisions. Central requests cannot bypass those safety rules.
+
+The assignment's page 2 says traffic control senses railway gates rather than directly controlling them; page 3 allows operator requests to the boom-gate/train-approach system. The implemented boundary is a Train-owned request handler. `train-cmd train-up` simulates a train travelling through crossings; it does not raise a gate. Open/closing/closed/opening/fault display concerns boom gates, not passenger-train doors.
+
+Central-origin operator overrides are described by the assignment. The repository's additional Local-origin `MSG_OVERRIDE_REQUEST` and Central-to-Local `MSG_DISPLAY_UPDATE` are optional design choices with undefined behavior. Central rejects unsupported override requests and does not produce those display messages. The separate Central display process uses a private interface and does not assign new meaning to either shared message.
+
+## Messages and current peer support
+
+| Route | Message | Current Central behavior and integration condition |
 | --- | --- | --- |
-| Local -> Central | `MSG_STATUS_UPDATE` | Latest observed state of one intersection |
-| Local/Train -> Central | `MSG_HEARTBEAT` | Contact, with typed health information when supplied |
-| Local/Train -> Central | `MSG_FAULT_ALERT` | Report a fault; `FAULT_NONE` clears the retained alert |
-| Train -> Central | `MSG_RAILWAY_STATUS` | Latest crossing/train/gate state |
-| Central -> Local | `MSG_MODE_COMMAND` | Request fixed/sensor mode, temporary mode, or revert |
-| Central -> Local | `MSG_COORDINATION_COMMAND` | Request fixed-mode phase and cycle offset |
-| Local -> Central | `MSG_OVERRIDE_REQUEST` | Declared in v1; behavior pending agreement with Thao |
-| Central -> Local | `MSG_DISPLAY_UPDATE` | Declared in v1; behavior pending agreement with Thao |
+| Local -> Central | `MSG_STATUS_UPDATE` | Retains actual mode, phase, vehicle/pedestrian states, railway preemption, reported time remaining and local receive age for I1-I6. Local must publish them. |
+| Local/Train -> Central | `MSG_HEARTBEAT` | Records contact; typed payloads can additionally report per-target health. |
+| Local/Train -> Central | `MSG_FAULT_ALERT` | Retains source, type, severity, description and age. An explicit `FAULT_NONE` alert clears the retained alert. |
+| Train -> Central | `MSG_RAILWAY_STATUS` | Displays reported aggregate train state, gate state and fault for P1-P3. |
+| Central -> Local | `MSG_MODE_COMMAND` | Requests fixed/sensor, temporary mode, or cancellation of temporary mode. Local validates and safely applies it. |
+| Central -> Local | `MSG_COORDINATION_COMMAND` | Requests a fixed-mode phase and relative cycle offset; there is no shared activation epoch. |
+| Central -> Train | `MSG_TEST` | Carries an allowlisted simulator command in the existing string payload. Train implements this route despite the older shared-header comment that Central never sends to Train. |
+| Central -> Local/Train | `MSG_HEARTBEAT` | Compatibility contact probes, not proof of sensor or actuator health. |
+| Local -> Central | `MSG_OVERRIDE_REQUEST` | Declared in the shared header; application contract pending. |
+| Central -> Local | `MSG_DISPLAY_UPDATE` | Declared in the shared header; application contract pending. |
+| `central_ui` <-> Central core | Private local request/reply | Bounded commands and rendered status/history text, independent of the shared Local/Train ABI. |
 
-Central also probes the existing Local and Train services with heartbeat messages for compatibility with their demonstration receivers. This is contact checking; Central does not send train or lamp-control commands. The route comments in `protocol.h` do not fully describe this existing heartbeat exchange.
+The current Local source primarily implements communication demonstrations. A successful heartbeat/test reply does not establish support for real status generation, mode application, coordination, pedestrians or railway preemption. The Local owner must supply and demonstrate those behaviors.
 
-Service names are `traffic_central_controller`, `traffic_local_controller`, and `traffic_train_controller`. Use local name lookup when all processes run on one QNX VM (`-l`); global lookup requires the group's GNS deployment. The current deployment has one Local service responsible for routing I1-I6 internally. Six independent Local processes cannot all register this same name on one node without an agreed addressing change.
+## Wire formats and Central compatibility adapter
 
-## Exact version 1 wire format
+Outgoing Local commands and Train simulator requests remain complete `test_message_t` envelopes: `msg_header_t` followed by a 64-byte `data` array. Copy typed payloads into `data` and zero unused bytes. On the current x86_64 build the envelope is 104 bytes; use `sizeof` the declared structures rather than hard-coded counts.
 
-Every application request is one complete `test_message_t`, including its `msg_header_t` and 64-byte `data` array. Copy the appropriate typed payload into `data`. Zero-initialize the envelope and payload; set `header.type`, `header.src`, `header.dst`, and a terminated timestamp. IDs use enum values: `I1 == 0`, `I6 == 5`, `P1 == 0`, `P3 == 2`.
+Central accepts these incoming forms after validating exact length, route, field ranges and timestamp termination:
 
-Do not send only `status_msg_t`, or a header followed by a shorter payload. The existing `any_msg_t` is a union: its `header` and `status` members overlap, so setting both does not construct a valid header-plus-payload frame. The v1 transport uses the native C layouts and has no wire version field or portable serialization; all peers must use compatible definitions, layout, and byte order.
-
-Every normal application reply is a full `reply_t` sent with **QNX reply status zero**:
-
-```c
-MsgReply(rcvid, 0, &reply, sizeof(reply));
-```
-
-`reply.status == 0` means the receiver accepted the request; `-1` means rejection. A successful mode or coordination reply must echo that request's nonzero `command_id`. Other supported messages use zero. Central tolerates a legacy rejection with a zero ID, but a new Local handler should echo the rejected command ID too. Do not put `sizeof(reply)` in the second `MsgReply` argument: that argument becomes the return value of `MsgSend`, not the reply length.
-
-### Local status and heartbeat examples
-
-These fragments illustrate message construction, not a complete Local controller. `snapshot` must come from the Local state machine under its synchronization rules; do not fabricate operational state to make Central appear ready.
-
-```c
-#include "common/common.h"  /* adjust include path for your target */
-
-static void local_frame(test_message_t *frame, msg_type_t type) {
-    time_t now = time(NULL);
-    struct tm wall;
-    memset(frame, 0, sizeof(*frame));
-    frame->header.type = type;
-    frame->header.src = CONTROLLER_LOCAL;
-    frame->header.dst = CONTROLLER_CENTRAL;
-    if (localtime_r(&now, &wall) != NULL)
-        strftime(frame->header.timestamp, sizeof(frame->header.timestamp),
-                 "%H:%M:%S", &wall);
-}
-
-static void make_status(test_message_t *frame,
-                        const status_msg_t *snapshot) {
-    local_frame(frame, MSG_STATUS_UPDATE);
-    memcpy(frame->data, snapshot, sizeof(*snapshot));
-}
-
-static void make_heartbeat(test_message_t *frame, uint8_t intersection,
-                           uint8_t healthy, uint16_t sequence) {
-    heartbeat_msg_t heartbeat = {0};
-    local_frame(frame, MSG_HEARTBEAT);
-    heartbeat.sender_id = intersection; /* I1..I6 */
-    heartbeat.healthy = healthy;        /* 0 degraded, 1 healthy */
-    heartbeat.sequence = sequence;
-    memcpy(frame->data, &heartbeat, sizeof(heartbeat));
-}
-```
-
-A telemetry worker can send the complete frame to an already opened Central connection:
-
-```c
-test_message_t frame;
-reply_t reply;
-uint64_t timeout_ns = UINT64_C(500000000);
-make_status(&frame, &snapshot);
-memset(&reply, 0xa5, sizeof(reply)); /* a short reply must not look successful */
-if (TimerTimeout(CLOCK_MONOTONIC, _NTO_TIMEOUT_SEND | _NTO_TIMEOUT_REPLY,
-                 NULL, &timeout_ns, NULL) == -1) {
-    /* Record error; do not issue an unbounded send as fallback. */
-} else {
-    int result = MsgSend(central_coid, &frame, sizeof(frame),
-                         &reply, sizeof(reply));
-    if (result != 0 || reply.status != 0 || reply.command_id != 0 ||
-        memchr(reply.timestamp, '\0', sizeof(reply.timestamp)) == NULL) {
-        /* Treat this attempt as rejected/unconfirmed; inspect errno when -1. */
-    }
-}
-```
-
-Keep telemetry IPC outside the Local lamp/state-machine thread. Use a bounded handoff or latest-state snapshot so a missing Central cannot stall phase transitions. Keep memory owned by the sending worker valid until its actual `MsgSend` returns; a caller-side timeout must not free memory still referenced by an outstanding IPC operation.
-
-Legacy `common/communication/send.c` sends an all-zero heartbeat payload. Central treats `{sender_id=0, healthy=0, sequence=0}` as unspecified legacy health, not an explicit degradation of I1 or P1. It does not clear previously reported typed degradation. A typed degraded I1/P1 heartbeat must use a nonzero sequence to avoid this ambiguity, including when the 16-bit sequence wraps. This compatibility convention is not a session or replay-protection mechanism.
-
-### Local mode and coordination receipt
-
-After checking the full received byte count, route, timestamp termination, enum values, target, duration/offset, and nonzero command ID, copy the payload out of `data`:
-
-```c
-mode_cmd_msg_t mode;
-coordination_command_msg_t coordination;
-reply_t reply = {0};
-/* `frame` is a complete, validated test_message_t received from Central. */
-if (frame.header.type == MSG_MODE_COMMAND) {
-    memcpy(&mode, frame.data, sizeof(mode));
-    reply.command_id = mode.command_id;
-    reply.status = local_try_enqueue_mode(&mode) == 0 ? 0 : -1;
-} else if (frame.header.type == MSG_COORDINATION_COMMAND) {
-    memcpy(&coordination, frame.data, sizeof(coordination));
-    reply.command_id = coordination.command_id;
-    reply.status = local_try_enqueue_coordination(&coordination) == 0 ? 0 : -1;
-} else {
-    reply.status = -1;
-}
-/* Fill reply.timestamp with a terminated HH:MM:SS string, if available. */
-MsgReply(rcvid, 0, &reply, sizeof(reply));
-```
-
-The two `local_try_enqueue_*` names above are illustrative Local-owned functions, not existing APIs. They must make a bounded copy and reject when the Local queue cannot accept the request. The raw-receiver example replies exactly once. With the existing `receive_loop` callback API, fill its supplied `reply_t` and return zero instead; that wrapper issues `MsgReply` itself. Returning an error through the old wrapper replaces the supplied reply with a generic rejection and loses the command ID.
-
-The Local state machine applies an accepted request later at a safe transition. Publish the actual resulting `status_msg_t` after it applies; never change telemetry immediately to the requested state unless the real state has changed. `ACCEPTED` in Central's history confirms receipt/acceptance only. Version 1 has no applied-command ID in status, so observing the requested mode later cannot prove which request caused it. Central leaves uncertain delivery `UNCONFIRMED` and does not automatically retry a command that may already have executed.
-
-Central sends per-intersection requests for `all`. Each gets a separate ID; the group is not atomic or simultaneous. Coordination v1 contains a phase and relative offset but no common activation timestamp, timebase, or late-arrival rule. Agree those semantics before claiming synchronized intersections.
-
-## Local owns real-time actuation
-
-Central provides supervision and operator requests. Local owns safe phase transitions, pedestrian timing, railway preemption, output validation, and behavior during communication loss. A Central request cannot authorize conflicting movements or bypass railway/failsafe behavior. Local also owns a temporary mode's timer and reversion, so disconnecting Central cannot leave the timer dependent on further messages.
-
-The group must agree when a temporary duration starts (receipt or safe application), which baseline is restored, and how replacement/revert behaves during railway preemption. These details are not fully specified by the v1 fields. Likewise, `CMD_PRIO_OPERATOR` and `CMD_PRIO_SCHEDULE` are application request priorities, not QNX thread priorities or permission to override safety.
-
-Proposed telemetry contract for discussion: publish state changes promptly and repeat each owned intersection's current state at least once per second. Heartbeats alone show contact, not that phase/status generation is progressing. Central uses a provisional five-second status-age limit for commands, configurable with `-s 1..60`, and rechecks readiness before transmission. Its five-second queue lifetime discards unsent old operator intent. These are supervisory settings, not proven safety deadlines; agree the reporting period, worst-case latency, and allowed age with Local before changing them.
-
-## Override and display: decisions for Thao
-
-The declarations establish routes and fields; they do not require automatic approval or define a usable end-to-end behavior. Central currently rejects unsupported override requests and does not produce display updates. Continue developing against the existing types, but agree the following before adding application behavior:
-
-| Decision | What to settle |
+| Incoming form | ID convention |
 | --- | --- |
-| Route and scope | Does only Local originate overrides? Does `source_id` always mean an intersection? Which Local display consumes a Central update? |
-| Meaning | Is override a notification, operator approval request, or automatic mode request? What are the valid `reason` values? What information must the display show? |
-| Timing | When does a request expire? How often are display updates sent? Which timebase and safe activation point apply? |
-| Ownership | Who decides acceptance? Local retains railway/failsafe and temporary-expiry authority. Is display informational or used by another controller? |
-| Reply and result | How is `request_id` correlated with approval/rejection and later application? Can existing messages express this, or does the group need an explicit protocol revision? |
-| Failure and replacement | What happens on a duplicate, new request, restart, communication loss, delayed reply, or stale display data? |
+| Original full `test_message_t` envelope | Protocol enum IDs: I1=0 through I6=5; P1=0 through P3=2. |
+| `status_full_msg_t` / `heartbeat_full_msg_t` | Protocol enum IDs. Compact framing does not change Local or heartbeat IDs. |
+| Train `railway_status_full_msg_t` / `fault_full_msg_t` | Current Train sends crossing-object IDs 1 through 3. Central converts these exact compact Train frames to P1=0 through P3=2 internally. |
+| Local `fault_full_msg_t` | Protocol intersection enum IDs, unchanged. |
+
+The adapter selects a dialect using message type, source and exact structure size. It does not guess whether an overlapping ID such as `1` means P1 or P2. An envelope crossing ID `1` still means P2. A future Train compact producer must not switch to zero-based IDs without updating this agreement. This compatibility rule does not alter the shared header.
+
+Bare payloads, truncated/oversized frames, unrelated compact types and malformed routes are rejected. `any_msg_t` is a union: its header and payload members overlap, so assigning both does not construct a combined frame. Native C layout and byte order remain part of the ABI. `PROTOCOL_VERSION` is a compile-time macro, not an on-wire negotiation field.
+
+Every external Local/Train application reply is a complete `reply_t`, with QNX reply status zero:
+
+```c
+MsgReply(rcvid, 0, &reply, sizeof(reply));
+```
+
+The second argument becomes the return value of `MsgSend`, not its reply byte count. Set `reply.status` to zero for acceptance or `-1` for rejection, supply a terminated timestamp, and echo the nonzero mode/coordination `command_id`. Other current messages use ID zero. Central tolerates an older rejection with ID zero; new Local handlers should echo the rejected ID too. With the existing shared receive callback wrapper, fill its supplied reply and return zero; the wrapper performs `MsgReply`.
+
+`ACCEPTED` means a receipt/acceptance reply, not application of the requested state. Status v1 has no applied-command ID. Train is weaker: its current `MSG_TEST` handler discards the simulator's Boolean result and text, then returns success. Central therefore cannot distinguish successful simulation from BUSY or application rejection. `train-cmd status` reaches that handler, but its textual simulator result is not returned to Central. Inspect actual crossing telemetry and the Train console; an ACK is insufficient evidence of success.
+
+## Names, processes and deployment
+
+Default external services are `traffic_central_controller`, `traffic_local_controller` and `traffic_train_controller`. `-l` uses same-node lookup; `-g` requires functioning GNS/Qnet. Global configuration alone is not proof of tested multi-node operation.
+
+Central defaults to one Local service routing six logical IDs. For separately named Local services, repeated mappings configure Central's destinations:
+
+```sh
+./central_controller -g --headless \
+  --local-endpoint I1=traffic_local_I1 \
+  --local-endpoint I2=traffic_local_I2
+```
+
+Unmapped IDs retain the default route. The Local owner must publish the selected services and correct IDs. Central does not create six Local state machines or rename another person's services. Agree a complete node/service map before the demonstration. The v1 header does not authenticate which process owns an intersection ID.
+
+For a separate display, start the core on its QNX node:
+
+```sh
+./central_controller -l --headless --schedule config/daily_schedule.example
+```
+
+In another terminal on that node:
+
+```sh
+./central_ui
+```
+
+The private default UI service is `traffic_central_controller_ui`. `central_ui -n name` selects another local UI service; `--no-color` disables color. `quit` closes the separate UI, while `shutdown` asks the core to stop. Closing the UI or its terminal leaves a headless core running. The embedded console remains available without `--headless`. Build/transfer both executables and the chosen configuration file using [README.md](README.md).
+
+## Operator requests and schedules
+
+| Operator input | Meaning |
+| --- | --- |
+| `mode-fixed I1`, `mode-sensor all` | Persistent high-level operator mode request. |
+| `mode-temp I1 sensor 30` | Temporary request; Local owns activation, timing and reversion. |
+| `mode-revert I1` | Cancels temporary mode; preserves persistent operator intent. |
+| `coordinate all NS 0` | Per-target phase/offset requests with separate receipts. |
+| `coordinate-at 10 all NS 0` | Becomes eligible for dispatch at Central after 10 monotonic seconds; it does not synchronize Local application. |
+| `schedule` | Shows loaded entries and Central operator-policy information. |
+| `schedule-resume I1` | Explicitly releases Central's hold so the current schedule may be requested once the target is ready. |
+| `version` | Shows build label and compilation stamp for deployment checks. |
+
+Daily files are loaded once at startup with `--schedule path`. A row is `HH:MM fixed|sensor I1..I6|all`, using the QNX target's local clock/timezone. The parser accepts up to 32 entries and 1024 physical lines and rejects overlapping same-time rows affecting the same target. File order is irrelevant: each target selects its most recent applicable daily row, wrapping to the previous day before the first row. A target with no row gets no invented default. See [daily_schedule.example](config/daily_schedule.example).
+
+Persistent operator intent takes precedence over scheduling. A temporary operator mode suppresses scheduling using a monotonic deadline; an earlier persistent override remains after that temporary interval. Ordinary `mode-revert` preserves that persistent intent. Rejected or uncertain operator requests conservatively hold automatic changes until `schedule-resume`. Receipt-based Central suppression does not determine Local's actual temporary-mode start/end; the group must agree that contract.
+
+Scheduling requests a new desired mode instead of replaying a command every tick. Uncertain requests are not automatically retried after reconnect. If an unchanged scheduled intent must be requested again after investigation, use `schedule-resume` deliberately. Wall-clock changes may change the selected daily row. Temporary intervals, data age, queue lifetime and dispatch delays use the monotonic clock; no cross-node clock accuracy is guaranteed.
+
+`all` expands to individual messages with separate IDs and readiness checks, so receipt is neither atomic nor simultaneous. A request's five-second queue allowance starts when it becomes eligible for dispatch: `coordinate-at 10 ...` waits ten intentional seconds and then has five seconds to begin transmission. Late unsent intent expires.
+
+Train simulation commands have a separate queue and strict allowlist:
+
+```text
+train-cmd train-up
+train-cmd train-down
+train-cmd train P1 up
+train-cmd noexit P2 down
+train-cmd stuck P3
+train-cmd reset P1
+train-cmd test
+train-cmd test 1
+train-cmd scale 10
+train-cmd status
+```
+
+Valid crossings are P1-P3, directions `up`/`down`, tests 1-7 and scale 1-100. These are simulator event/test requests. Arbitrary raw strings are rejected. Train retains responsibility for safe reset, simulator events and command results.
+
+The parser recognizes the existing `p#-fault` syntax, but Central deliberately refuses to send it to the current Train peer. That remote handler holds Train's state mutex before invoking fault handling, whose connection check tries to lock the same mutex again. The resulting deadlock must be fixed by the Train owner. Until then, use the Train console for direct `p1-fault`, or request `train-cmd stuck P1` followed by `train-cmd train P1 up` to exercise a stuck-gate scenario through the simulator. Central prints `Not sent` for the blocked direct remote fault command.
+
+## Telemetry and timing agreement
+
+Local should publish a snapshot whenever a light changes, as required by the assignment. The proposed integration contract also repeats every owned intersection's current snapshot at least once per second. That repeat period is a design assumption to agree and measure, not a number supplied by the assignment. Heartbeats alone cannot show that phase or status generation is progressing.
+
+Central uses one-second heartbeat releases, three consecutive missed probes for link-down, a 500 ms caller wait per peer operation, a five-second queue allowance and a default five-second status-age limit configurable with `-s 1..60`. Scheduling/network delay means these are settings, not measured worst-case bounds. Readiness is checked again before transmission. Missing data remains waiting/unknown, and old snapshots retain an age and stale/offline indication.
+
+The shared sender's all-zero heartbeat is ambiguous: `{sender_id=0, healthy=0, sequence=0}` means unspecified legacy health to Central, not an explicit I1/P1 degradation. It cannot clear an earlier typed degradation. Typed degraded I1/P1 reports need a nonzero sequence, including at wrap. This convention provides no session or replay protection.
+
+Current Train status does not publish independent up/down track occupancy, the train STOP signal or flashing-light phase. Central labels unavailable details unreported rather than inferring them from gates or ACKs. Retained fault alerts and current status snapshots are separate observations; agree explicit fault-clear reporting with Train.
+
+## Remaining peer-owned work
+
+| Owner | Handoff or review |
+| --- | --- |
+| Local | Publish real status after changes and agreed refresh; safely handle mode/temp/revert/coordination; echo IDs; continue phases, railway protection and temporary expiry while Central is offline. |
+| Train | Return simulator results/BUSY instead of unconditional success. Add train STOP, track and flash reports only via an agreed protocol change if required. |
+| Train | Move blocking outbound `MsgSend` work away from simulator/state-machine callbacks using a bounded handoff. Current callbacks can wait on Central/Local. |
+| Train | Fix the remote `p#-fault` self-deadlock caused by re-locking the same state mutex in a callback. Synchronize simulator state shared by tick, console and remote-command paths; Central's separate queue cannot repair internal races. |
+| Train + Local | Map P1 to I1/I2, P2 to I3/I4 and P3 to I5/I6. Current Train preemption uses its crossing ID in an intersection-ID field, which does not establish delivery to both affected intersections. |
+| Group | Agree node/service ownership, frame dialects and ID bases, telemetry timing, temporary baseline/activation, recovery and demonstration scenarios. |
+| Thao, for optional override/display | Define request meaning/reasons, target display, expiry, reply/application correlation, duplicates, restart and stale-display behavior before enabling those routes. |
+
+A future protocol should negotiate version/capabilities, identify sender sessions and per-target status sequences, and distinguish RECEIVED/QUEUED/APPLIED/REJECTED/BUSY with command IDs. True synchronized coordination also needs a common activation epoch/timebase, clock accuracy, late-arrival behavior and cancellation. Existing fields must not be silently repurposed to imply these guarantees.
 
 Suggested message to Thao:
 
-> T dang hoan thien Central theo protocol hien tai. Phan override/display m dang lam, gui t giup flow du kien nhe: Local gui override khi nao, Central chi ghi nhan hay can duyet/gui mode lai; display can hien gi va cap nhat bao lau; request_id/ACK va timeout xu ly sao? T da chuan bi interface va test phia Central, nhung can chot y nghia truoc khi ghep de khoi sua qua lai. Railway/failsafe va hen gio revert van do Local quan ly.
+> T đã làm phía Central: hiển thị trạng thái thật, lệnh fixed/sensor/temp/revert, coordination, lịch giờ và UI riêng. M gửi t phần Local đang hỗ trợ, tên service/ID và format status nhé. Local cần gửi trạng thái mỗi khi đèn đổi, tự chuyển pha an toàn và tự hết hạn temp kể cả Central mất kết nối; ACK phải echo command_id. Phần Local gửi override hoặc Central gửi display xuống Local không bắt buộc riêng trong đề, nên nếu m đang làm thì chốt giúp t flow, ý nghĩa và timeout trước khi ghép. T giữ nguyên code của m.
 
-## QNX real-time review
+Suggested message to the Train owner:
 
-These are implementation criteria and limits; running on an RTOS does not prove the whole application meets its deadlines.
+> Central đã nhận frame compact bên Train và đổi ID P1-P3 ở phía Central; có train-cmd để chuyển các lệnh simulator đã kiểm tra. T đang chặn gửi p#-fault từ Central vì remote handler khóa mutex rồi callback khóa lại chính mutex đó, dễ deadlock; tạm dùng console Train hoặc test stuck gate. Bên m giúp sửa chỗ này và trả đúng kết quả/BUSY thay vì luôn ACK thành công; chốt fault-clear và train STOP/track/flash nếu cần hiển thị. Cần kiểm tra callback IPC bị chặn, đồng bộ simulator và mapping một crossing tới hai intersection. T không sửa code Train, sẽ ghép/test theo contract mình thống nhất.
 
-- Use `CLOCK_MONOTONIC` for elapsed time, freshness, queue expiry, and periodic release times. Wall-clock timestamps are for human logs. If a condition-variable deadline is monotonic, initialize its clock to monotonic too; the default is the system clock. [QNX monotonic clock](https://qnx.com/developers/docs/7.1/com.qnx.doc.neutrino.getting_started/topic/s1_timer_CLOCK_MONOTONIC.html), [condition-variable clock](https://qnx.com/developers/docs/7.1/com.qnx.doc.neutrino.lib_ref/topic/p/pthread_condattr_setclock.html).
-- Retain absolute heartbeat due times and skip missed releases without a burst of catch-up sends. Check heartbeat work between commands. This avoids cumulative work-plus-sleep drift, but a send already in progress can delay the next probe. QNX sleep expiry makes a thread ready; clock resolution and scheduling can delay actual execution. [QNX clock_nanosleep](https://www.qnx.com/developers/docs/7.1/com.qnx.doc.neutrino.lib_ref/topic/c/clock_nanosleep.html).
-- Keep shared-state critical sections short. QNX's default mutex attributes already use priority inheritance; this helps priority inversion but does not make an unbounded I/O operation inside a lock bounded. Choose process/thread priorities with the whole Local/Train workload, then measure them; raising Central above safety-critical Local work is not an automatic improvement. [QNX mutexes](https://qdn.qnx.com/developers/docs/7.1/com.qnx.doc.neutrino.sys_arch/topic/kernel_Mutexes.html), [QNX scheduling](https://qdn.qnx.com/developers/docs/7.1/com.qnx.doc.neutrino.prog/topic/overview_SCHEDS.html).
-- Bound queues and application waits, and define overload behavior. Call `TimerTimeout` immediately before the intended blocking IPC. A 500 ms caller-side wait limits that application's wait under scheduling assumptions; it is not a universal upper bound on kernel IPC completion. [QNX TimerTimeout](https://qdn.qnx.com/developers/docs/7.1/com.qnx.doc.neutrino.lib_ref/topic/t/timertimeout.html).
+## Real-time evidence required
 
-With `_NTO_CHF_UNBLOCK`, a receiver that already accepted a message gets an unblock pulse when the sender tries to time out. The receiver must resolve the pending transaction with a reply/error; a stopped or unresponsive receiver can keep the sender blocked. Central isolates one pending operation per link so the other peer and operator processing can continue. It cannot force a legacy peer to release that request. Shutdown may remain pending until that peer resumes, replies, or exits. Correcting this needs peer/channel design and tests, not another Central-only timeout. [QNX channel unblock behavior](https://qdn.qnx.com/developers/docs/7.1/com.qnx.doc.neutrino.lib_ref/topic/c/channelcreate.html).
+Elapsed time and timed condition waits must use the same monotonic clock; QNX condition variables otherwise default to the system clock. Central uses absolute heartbeat releases, skips missed periods and keeps blocking peer/file I/O outside monitor critical sections. These decisions reduce timing interference but do not establish a worst-case response time. [QNX condition-variable clocks](https://qnx.com/developers/docs/7.1/com.qnx.doc.neutrino.lib_ref/topic/p/pthread_condattr_setclock.html).
 
-## Integration evidence still required
+QNX timeouts must cover SEND-blocked and REPLY-blocked states. With `_NTO_CHF_UNBLOCK`, a server that already accepted a message may need to reply after an unblock pulse before the kernel sender is released. Central isolates outstanding operations and retains their buffers, but cannot force a stopped peer to finish. A blocked peer or filesystem can still delay process termination. [QNX kernel message timeouts](https://qnx.com/developers/docs/7.1/com.qnx.doc.neutrino.getting_started/topic/s1_timer_Kernel_timeouts_with_messages.html).
 
-The Central tests use peer fixtures. Before calling the integrated system complete, test with Thao's real Local and the real Train processes on the target QNX setup:
+Priority inheritance helps with inversion, but long critical sections and unsuitable task priorities still need analysis. Choose priorities across Central, Local and Train using deadlines and measured workloads. Raising Central's priority alone is not a schedulability argument. [QNX priority-inversion guidance](https://qnx.com/developers/docs/7.1/com.qnx.doc.ide.userguide/topic/detecting_priority_inversion.html).
 
-1. Start in either order, exchange all per-target reports, disconnect/reconnect, and verify stale data cannot authorize a command until fresh status arrives.
-2. Accept, reject, queue, expire, and safely apply mode/temporary/revert/coordination requests; verify matching IDs, actual state reports, temporary expiry with Central offline, and railway precedence.
-3. Flood operator commands while delaying one peer's replies. Verify bounded memory, heartbeat service between sends, queue expiry, and continued operation of the other peer. Stop a peer after it receives a message; verify continued Central responsiveness and the documented pending-shutdown behavior, then resume it.
-4. Restart peers, wrap heartbeat/command IDs, and inject delayed/duplicate messages. Version 1 has no session ID, status sequence, explicit apply acknowledgement, or idempotence contract; record these limits rather than treating timestamps as proof of freshness.
-5. Measure worst observed release jitter, receive-to-ACK latency, command queue age, status delivery latency, lock hold times, CPU use, and UI/log backpressure under target load and the actual GNS/network path. Agree deadlines, analyze worst-case execution/blocking and task priorities, and record whether the system meets them. Fixture passes or average timings alone do not establish a hard real-time guarantee.
+After fixtures, test actual peers on intended nodes: both startup orders, stale/recovery, one failed endpoint, flood/slow replies, independent UI exit, temporary expiry with Central offline, trains on both tracks, gate fault/clear and red train signal, and correct affected intersection pairs. Record receive-to-ACK latency, queue delay, heartbeat jitter, status age, lock hold times, CPU load and real network behavior. [VALIDATION.md](VALIDATION.md) distinguishes completed observations from pending scenarios. Fixture passes do not complete peer state machines or prove a hard real-time guarantee.

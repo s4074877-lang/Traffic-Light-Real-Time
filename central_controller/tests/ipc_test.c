@@ -9,6 +9,11 @@ static unsigned checks;
 static pid_t servers[2] = {-1, -1};
 static int notice[2] = {-1, -1};
 
+typedef struct {
+    unsigned calls;
+    test_message_t last;
+} receiver_observation_t;
+
 /* Fixture controls live after the typed command in its unused data bytes. */
 typedef struct {
     uint8_t active;
@@ -121,9 +126,11 @@ static void start_server(unsigned index, const char *name) {
 }
 
 static int receiver_callback(const test_message_t *message, reply_t *reply, void *context) {
-    unsigned *calls = context;
-    __atomic_add_fetch(calls, 1, __ATOMIC_SEQ_CST);
-    reply->status = !strcmp(message->data, "NACK") ? -1 : 0;
+    receiver_observation_t *observation = context;
+    observation->last = *message;
+    __atomic_add_fetch(&observation->calls, 1, __ATOMIC_SEQ_CST);
+    reply->status = message->header.type == MSG_TEST &&
+        !strcmp(message->data, "NACK") ? -1 : 0;
     return 0;
 }
 
@@ -138,6 +145,220 @@ static int raw_send(int coid, const void *message, size_t size, reply_t *reply) 
     TimerTimeout(CLOCK_MONOTONIC, _NTO_TIMEOUT_SEND | _NTO_TIMEOUT_REPLY,
                  NULL, &timeout, NULL);
     return MsgSend(coid, message, size, reply, sizeof(*reply));
+}
+
+static void test_compact_frames(void) {
+    test_message_t envelope, normalized, before;
+    railway_status_full_msg_t railway;
+    fault_full_msg_t fault;
+    status_full_msg_t status;
+    heartbeat_full_msg_t heartbeat;
+    unsigned char bytes[sizeof(test_message_t) + 1];
+    size_t size;
+    unsigned id;
+
+    central_message_init(&envelope, MSG_RAILWAY_STATUS, CONTROLLER_TRAIN,
+                         CONTROLLER_CENTRAL);
+    memset(&railway, 0, sizeof(railway));
+    railway.header = envelope.header;
+    railway.payload.train_state = TRAIN_APPROACHING;
+    railway.payload.gate_state = GATE_CLOSING;
+    railway.payload.fault = FAULT_NONE;
+    for (id = 1; id <= NUM_CROSSINGS; ++id) {
+        railway.payload.crossing_id = id;
+        require(central_frame_normalize(&railway, sizeof(railway), CONTROLLER_CENTRAL,
+                                         &normalized), "compact Train status accepted");
+        railway_status_msg_t decoded;
+        memcpy(&decoded, normalized.data, sizeof(decoded));
+        require(decoded.crossing_id == id - 1 &&
+                decoded.train_state == TRAIN_APPROACHING &&
+                decoded.gate_state == GATE_CLOSING && decoded.fault == FAULT_NONE,
+                "compact Train IDs P1-P3 normalized without changing status");
+        require(central_frame_valid(&normalized, sizeof(normalized), CONTROLLER_CENTRAL),
+                "normalization produces a valid internal envelope");
+        for (size = sizeof(decoded); size < sizeof(normalized.data); ++size) {
+            require(normalized.data[size] == 0, "compact padding is initialized");
+        }
+        railway_status_msg_t legacy = railway.payload;
+        legacy.crossing_id = id - 1;
+        memcpy(envelope.data, &legacy, sizeof(legacy));
+        require(central_frame_normalize(&envelope, sizeof(envelope), CONTROLLER_CENTRAL,
+                                         &normalized) &&
+                memcmp(&envelope, &normalized, sizeof(envelope)) == 0,
+                "legacy zero-based crossing envelope preserved byte for byte");
+    }
+    railway.payload.crossing_id = 1;
+    memcpy(envelope.data, &railway.payload, sizeof(railway.payload));
+    require(central_frame_normalize(&railway, sizeof(railway), CONTROLLER_CENTRAL,
+                                     &normalized) && normalized.data[0] == P1,
+            "compact ID 1 is P1");
+    require(central_frame_normalize(&envelope, sizeof(envelope), CONTROLLER_CENTRAL,
+                                     &normalized) && normalized.data[0] == P2,
+            "envelope ID 1 is P2, no ambiguous ID heuristic");
+    memset(&normalized, 0x5a, sizeof(normalized));
+    before = normalized;
+    for (id = 0; id <= NUM_CROSSINGS + 1; id += NUM_CROSSINGS + 1) {
+        railway.payload.crossing_id = id;
+        require(!central_frame_normalize(&railway, sizeof(railway), CONTROLLER_CENTRAL,
+                                          &normalized), "compact Train ID outside 1..3 rejected");
+        require(memcmp(&before, &normalized, sizeof(before)) == 0,
+                "failed normalization leaves output unchanged");
+    }
+    railway.payload.crossing_id = 1;
+    memset(bytes, 0, sizeof(bytes));
+    memcpy(bytes, &railway, sizeof(railway));
+    for (size = 0; size <= sizeof(bytes); ++size) {
+        if (size == sizeof(railway) || size == sizeof(envelope)) continue;
+        require(!central_frame_normalize(bytes, size, CONTROLLER_CENTRAL, &normalized),
+                "truncated, oversized and partially padded status frames rejected");
+    }
+    railway.payload.gate_state = GATE_FAULT + 1;
+    require(!central_frame_normalize(&railway, sizeof(railway), CONTROLLER_CENTRAL,
+                                      &normalized), "invalid compact gate enum rejected");
+    railway.payload.gate_state = GATE_CLOSING;
+    railway.payload.train_state = TRAIN_CLEAR + 1;
+    require(!central_frame_normalize(&railway, sizeof(railway), CONTROLLER_CENTRAL,
+                                      &normalized), "invalid compact train enum rejected");
+    railway.payload.train_state = TRAIN_APPROACHING;
+    railway.header.src = CONTROLLER_LOCAL;
+    require(!central_frame_normalize(&railway, sizeof(railway), CONTROLLER_CENTRAL,
+                                      &normalized), "compact railway status requires Train source");
+    railway.header.src = CONTROLLER_TRAIN;
+    railway.header.dst = CONTROLLER_LOCAL;
+    require(!central_frame_normalize(&railway, sizeof(railway), CONTROLLER_CENTRAL,
+                                      &normalized), "compact wrong destination rejected");
+    railway.header.dst = CONTROLLER_CENTRAL;
+    railway.header.reserved = 1;
+    require(!central_frame_normalize(&railway, sizeof(railway), CONTROLLER_CENTRAL,
+                                      &normalized), "compact reserved header rejected");
+    railway.header.reserved = 0;
+    memset(railway.header.timestamp, 'x', sizeof(railway.header.timestamp));
+    require(!central_frame_normalize(&railway, sizeof(railway), CONTROLLER_CENTRAL,
+                                      &normalized), "compact timestamp must terminate");
+
+    central_message_init(&envelope, MSG_FAULT_ALERT, CONTROLLER_TRAIN, CONTROLLER_CENTRAL);
+    memset(&fault, 0, sizeof(fault));
+    fault.header = envelope.header;
+    fault.payload.fault_type = FAULT_GATE;
+    fault.payload.severity = SEV_CRITICAL;
+    strcpy(fault.payload.description, "P3 gate failed to close");
+    for (id = 1; id <= NUM_CROSSINGS; ++id) {
+        fault.payload.source_id = id;
+        require(central_frame_normalize(&fault, sizeof(fault), CONTROLLER_CENTRAL,
+                                         &normalized), "compact Train fault accepted");
+        fault_msg_t decoded;
+        memcpy(&decoded, normalized.data, sizeof(decoded));
+        require(decoded.source_id == id - 1 && decoded.fault_type == FAULT_GATE &&
+                decoded.severity == SEV_CRITICAL &&
+                !strcmp(decoded.description, fault.payload.description),
+                "fault ID normalized and reported description preserved");
+    }
+    memset(bytes, 0, sizeof(bytes));
+    memcpy(bytes, &fault, sizeof(fault));
+    for (size = 0; size <= sizeof(bytes); ++size) {
+        if (size == sizeof(fault) || size == sizeof(envelope)) continue;
+        require(!central_frame_normalize(bytes, size, CONTROLLER_CENTRAL, &normalized),
+                "truncated, oversized and partially padded fault frames rejected");
+    }
+    fault.payload.source_id = 0;
+    require(!central_frame_normalize(&fault, sizeof(fault), CONTROLLER_CENTRAL,
+                                      &normalized), "compact Train fault ID zero rejected");
+    fault.payload.source_id = NUM_CROSSINGS + 1;
+    require(!central_frame_normalize(&fault, sizeof(fault), CONTROLLER_CENTRAL,
+                                      &normalized), "compact Train fault ID too large rejected");
+    fault.payload.source_id = 1;
+    fault.payload.severity = 0;
+    require(!central_frame_normalize(&fault, sizeof(fault), CONTROLLER_CENTRAL,
+                                      &normalized), "invalid compact fault severity rejected");
+    fault.payload.severity = SEV_CRITICAL;
+    memset(fault.payload.description, 'x', sizeof(fault.payload.description));
+    require(!central_frame_normalize(&fault, sizeof(fault), CONTROLLER_CENTRAL,
+                                      &normalized), "unterminated compact fault description rejected");
+    strcpy(fault.payload.description, "lamp failure");
+    fault.header.src = CONTROLLER_LOCAL;
+    fault.payload.source_id = I1;
+    fault.payload.fault_type = FAULT_LIGHT;
+    require(central_frame_normalize(&fault, sizeof(fault), CONTROLLER_CENTRAL,
+                                     &normalized) && normalized.data[0] == I1,
+            "compact Local fault ID zero stays I1");
+
+    central_message_init(&envelope, MSG_STATUS_UPDATE, CONTROLLER_LOCAL, CONTROLLER_CENTRAL);
+    memset(&status, 0, sizeof(status));
+    status.header = envelope.header;
+    status.payload.intersection_id = I6;
+    status.payload.mode = MODE_SENSOR;
+    status.payload.ns_state = LIGHT_RED;
+    status.payload.ew_state = LIGHT_GREEN;
+    status.payload.phase = PHASE_EW_GREEN;
+    status.payload.time_remaining = 17;
+    require(central_frame_normalize(&status, sizeof(status), CONTROLLER_CENTRAL,
+                                     &normalized) &&
+            memcmp(normalized.data, &status.payload, sizeof(status.payload)) == 0,
+            "compact Local status preserves zero-based ID and timing");
+    status.payload.intersection_id = NUM_INTERSECTIONS;
+    require(!central_frame_normalize(&status, sizeof(status), CONTROLLER_CENTRAL,
+                                      &normalized), "invalid compact Local ID rejected");
+
+    central_message_init(&envelope, MSG_HEARTBEAT, CONTROLLER_TRAIN, CONTROLLER_CENTRAL);
+    memset(&heartbeat, 0, sizeof(heartbeat));
+    heartbeat.header = envelope.header;
+    heartbeat.payload.sender_id = P1;
+    heartbeat.payload.healthy = 1;
+    heartbeat.payload.sequence = 65535;
+    require(central_frame_normalize(&heartbeat, sizeof(heartbeat), CONTROLLER_CENTRAL,
+                                     &normalized) &&
+            memcmp(normalized.data, &heartbeat.payload, sizeof(heartbeat.payload)) == 0,
+            "typed compact heartbeat uses protocol zero-based ID");
+    heartbeat.payload.healthy = 2;
+    require(!central_frame_normalize(&heartbeat, sizeof(heartbeat), CONTROLLER_CENTRAL,
+                                      &normalized), "invalid compact heartbeat health rejected");
+    require(!central_frame_normalize(NULL, sizeof(envelope), CONTROLLER_CENTRAL, &normalized),
+            "null frame rejected");
+    require(!central_frame_normalize(&envelope, sizeof(envelope), CONTROLLER_CENTRAL, NULL),
+            "null output rejected");
+}
+
+static void test_compact_receiver(int coid, receiver_observation_t *observation) {
+    test_message_t envelope;
+    railway_status_full_msg_t railway;
+    fault_full_msg_t fault;
+    reply_t reply;
+    unsigned initial = __atomic_load_n(&observation->calls, __ATOMIC_SEQ_CST), accepted = 0, id;
+    central_message_init(&envelope, MSG_RAILWAY_STATUS, CONTROLLER_TRAIN, CONTROLLER_CENTRAL);
+    memset(&railway, 0, sizeof(railway));
+    railway.header = envelope.header;
+    railway.payload.train_state = TRAIN_AT_CROSSING;
+    railway.payload.gate_state = GATE_CLOSED;
+    for (id = 1; id <= NUM_CROSSINGS; ++id) {
+        railway.payload.crossing_id = id;
+        require(raw_send(coid, &railway, sizeof(railway), &reply) == 0 && reply.status == 0,
+                "actual compact Train status exchange succeeds");
+        ++accepted;
+        require(__atomic_load_n(&observation->calls, __ATOMIC_SEQ_CST) == initial + accepted &&
+                observation->last.header.type == MSG_RAILWAY_STATUS &&
+                (unsigned char)observation->last.data[0] == id - 1,
+                "actual receiver delivers each compact crossing to correct row");
+    }
+    railway.payload.crossing_id = 0;
+    require(raw_send(coid, &railway, sizeof(railway), &reply) == -1 && errno == EPROTO,
+            "actual receiver rejects compact Train ID zero");
+    railway.payload.crossing_id = 1;
+    require(raw_send(coid, &railway, sizeof(railway) - 1, &reply) == -1 && errno == EPROTO,
+            "actual receiver rejects truncated compact Train status");
+    central_message_init(&envelope, MSG_FAULT_ALERT, CONTROLLER_TRAIN, CONTROLLER_CENTRAL);
+    memset(&fault, 0, sizeof(fault));
+    fault.header = envelope.header;
+    fault.payload.source_id = 3;
+    fault.payload.fault_type = FAULT_GATE;
+    fault.payload.severity = SEV_CRITICAL;
+    strcpy(fault.payload.description, "P3 gate jammed");
+    require(raw_send(coid, &fault, sizeof(fault), &reply) == 0 && reply.status == 0,
+            "actual compact Train fault exchange succeeds");
+    ++accepted;
+    require(__atomic_load_n(&observation->calls, __ATOMIC_SEQ_CST) == initial + accepted &&
+            observation->last.header.type == MSG_FAULT_ALERT &&
+            observation->last.data[0] == P3,
+            "actual receiver fault maps to P3 and malformed frames bypass callback");
 }
 
 static void test_reply_prefixes(central_link_t *link) {
@@ -189,13 +410,15 @@ int main(void) {
     pthread_t thread;
     test_message_t message;
     reply_t reply;
-    unsigned callback_calls = 0, target;
+    receiver_observation_t observation = {0};
+    unsigned target;
     uint64_t started, elapsed;
     char local_name[64], train_name[64], receiver_name[64], byte = 0;
     int coid, rc;
 
     setvbuf(stdout, NULL, _IONBF, 0);
     atexit(cleanup);
+    test_compact_frames();
     snprintf(local_name, sizeof(local_name), "traffic_test_local_%ld", (long)getpid());
     snprintf(train_name, sizeof(train_name), "traffic_test_train_%ld", (long)getpid());
     snprintf(receiver_name, sizeof(receiver_name), "traffic_test_receiver_%ld", (long)getpid());
@@ -242,7 +465,7 @@ int main(void) {
     require(central_send(&local, &message, &reply) == CENTRAL_SEND_PROTOCOL, "unexpected kernel reply status");
 
     require(central_receiver_init(&receiver, receiver_name, CENTRAL_IPC_LOCAL,
-                                  CONTROLLER_CENTRAL, receiver_callback, &callback_calls) == 0,
+                                  CONTROLLER_CENTRAL, receiver_callback, &observation) == 0,
             "receiver init");
     require(pthread_create(&thread, NULL, receive_thread, &receiver) == 0, "receiver thread");
     coid = name_open(receiver_name, 0);
@@ -251,22 +474,23 @@ int main(void) {
     strcpy(message.data, "hello");
     require(raw_send(coid, &message, sizeof(message), &reply) == 0 && reply.status == 0,
             "central replies with kernel status zero and payload ACK");
-    require(__atomic_load_n(&callback_calls, __ATOMIC_SEQ_CST) == 1, "validated frame reaches callback");
+    require(__atomic_load_n(&observation.calls, __ATOMIC_SEQ_CST) == 1, "validated frame reaches callback");
     strcpy(message.data, "NACK");
     require(raw_send(coid, &message, sizeof(message), &reply) == 0 && reply.status == -1,
             "central callback NACK uses original ABI");
     rc = raw_send(coid, &message, sizeof(msg_header_t), &reply);
     require(rc == -1 || reply.status == -1, "short inbound frame rejected");
-    require(__atomic_load_n(&callback_calls, __ATOMIC_SEQ_CST) == 2, "short inbound frame bypasses callback");
+    require(__atomic_load_n(&observation.calls, __ATOMIC_SEQ_CST) == 2, "short inbound frame bypasses callback");
     message.header.dst = CONTROLLER_TRAIN;
     rc = raw_send(coid, &message, sizeof(message), &reply);
     require(rc == -1 || reply.status == -1, "wrong destination rejected");
-    require(__atomic_load_n(&callback_calls, __ATOMIC_SEQ_CST) == 2, "wrong destination bypasses callback");
+    require(__atomic_load_n(&observation.calls, __ATOMIC_SEQ_CST) == 2, "wrong destination bypasses callback");
     message.header.dst = CONTROLLER_CENTRAL;
     memset(message.header.timestamp, 'x', sizeof(message.header.timestamp));
     rc = raw_send(coid, &message, sizeof(message), &reply);
     require(rc == -1 || reply.status == -1, "unterminated inbound timestamp rejected");
-    require(__atomic_load_n(&callback_calls, __ATOMIC_SEQ_CST) == 2, "invalid timestamp bypasses callback");
+    require(__atomic_load_n(&observation.calls, __ATOMIC_SEQ_CST) == 2, "invalid timestamp bypasses callback");
+    test_compact_receiver(coid, &observation);
     name_close(coid);
     started = central_monotonic_ns();
     central_receiver_stop(&receiver);

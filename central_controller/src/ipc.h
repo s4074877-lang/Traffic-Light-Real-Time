@@ -52,9 +52,15 @@ void central_message_init(test_message_t *message, msg_type_t type,
 uint16_t central_command_id(const test_message_t *message);
 int central_frame_valid(const test_message_t *message, size_t size,
                          controller_type_t destination);
+// Convert an exact wire frame into the validated internal envelope. Legacy
+// envelopes use protocol zero-based IDs. Compact Train status/fault frames use
+// the current Train simulator's 1..3 IDs; compact heartbeat IDs remain zero-based
+// as defined by heartbeat_msg_t. Failed conversion leaves output unchanged.
+int central_frame_normalize(const void *frame, size_t size,
+                             controller_type_t destination, test_message_t *output);
 
-// The receive thread validates a complete legacy frame before invoking the
-// callback. Return 0 to reply, or -1 to reject. Callbacks complete inline.
+// The receive thread validates and normalizes a complete wire frame before
+// invoking the callback. Return 0 to reply, or -1 to reject. Callbacks complete inline.
 typedef int (*central_message_handler_t)(const test_message_t *message,
                                          reply_t *reply, void *context);
 typedef struct {

@@ -1,0 +1,13 @@
+# Central daily requests using the QNX target's local clock/timezone.
+# Enable: central_controller -l --headless --schedule <this-file>
+# Format: HH:MM fixed|sensor I1..I6|all
+# Illustrative peak/off-peak times; justify actual times in the group report.
+# Latest applicable row wins, including previous-day wrap.
+# Operator intent wins. Use schedule-resume I1 or schedule-resume all to release.
+# Local owns safe transitions, railway protection and temporary-mode expiry.
+# File is loaded once at startup and does not change another team's code.
+
+07:00 fixed all
+09:30 sensor all
+16:30 fixed all
+19:00 sensor all

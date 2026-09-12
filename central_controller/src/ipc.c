@@ -133,6 +133,70 @@ int central_frame_valid(const test_message_t *message, size_t size,
     }
 }
 
+int central_frame_normalize(const void *frame, size_t size,
+                             controller_type_t destination, test_message_t *output) {
+    test_message_t candidate;
+    if (frame == NULL || output == NULL || size < sizeof(msg_header_t) ||
+        size > sizeof(candidate)) {
+        return 0;
+    }
+    if (size == sizeof(candidate)) {
+        // The original envelope ABI remains byte-for-byte compatible. In
+        // particular, an envelope crossing ID 1 means P2, never P1.
+        memcpy(&candidate, frame, sizeof(candidate));
+    } else {
+        size_t expected = 0, payload_size = 0, payload_offset = 0;
+        memset(&candidate, 0, sizeof(candidate));
+        memcpy(&candidate.header, frame, sizeof(candidate.header));
+        switch (candidate.header.type) {
+            case MSG_HEARTBEAT:
+                expected = sizeof(heartbeat_full_msg_t);
+                payload_size = sizeof(heartbeat_msg_t);
+                payload_offset = offsetof(heartbeat_full_msg_t, payload);
+                break;
+            case MSG_STATUS_UPDATE:
+                expected = sizeof(status_full_msg_t);
+                payload_size = sizeof(status_msg_t);
+                payload_offset = offsetof(status_full_msg_t, payload);
+                break;
+            case MSG_FAULT_ALERT:
+                expected = sizeof(fault_full_msg_t);
+                payload_size = sizeof(fault_msg_t);
+                payload_offset = offsetof(fault_full_msg_t, payload);
+                break;
+            case MSG_RAILWAY_STATUS:
+                expected = sizeof(railway_status_full_msg_t);
+                payload_size = sizeof(railway_status_msg_t);
+                payload_offset = offsetof(railway_status_full_msg_t, payload);
+                break;
+            default:
+                return 0;
+        }
+        if (size != expected || payload_size > sizeof(candidate.data) ||
+            payload_offset > size || payload_size > size - payload_offset) {
+            return 0;
+        }
+        memcpy(candidate.data, (const char *)frame + payload_offset, payload_size);
+        if (candidate.header.src == CONTROLLER_TRAIN &&
+            (candidate.header.type == MSG_RAILWAY_STATUS ||
+             candidate.header.type == MSG_FAULT_ALERT)) {
+            // The Train implementation sends cx->id (1..3) in these compact
+            // structs. Select the dialect by exact frame size, not by whether
+            // an ID happens to be valid in two overlapping numbering schemes.
+            unsigned id = (unsigned char)candidate.data[0];
+            if (id < 1 || id > NUM_CROSSINGS) {
+                return 0;
+            }
+            candidate.data[0] = (char)(id - 1);
+        }
+    }
+    if (!central_frame_valid(&candidate, sizeof(candidate), destination)) {
+        return 0;
+    }
+    *output = candidate;
+    return 1;
+}
+
 static struct timespec deadline_after_ms(unsigned milliseconds) {
     uint64_t deadline = central_monotonic_ns() + (uint64_t)milliseconds * 1000000ULL;
     struct timespec result;
@@ -584,19 +648,20 @@ static int receive_frame(central_receiver_t *receiver) {
         reject_frame(rcvid, ENOSYS);
         return 0;
     }
+    test_message_t normalized;
     if (received != source_size || info.dstmsglen != sizeof(reply_t) ||
-        !central_frame_valid(&buffer.message, source_size, receiver->self)) {
+        !central_frame_normalize(&buffer.message, source_size, receiver->self, &normalized)) {
         reject_frame(rcvid, EPROTO);
         return 0;
     }
     reply_t reply;
     memset(&reply, 0, sizeof(reply));
-    reply.command_id = central_command_id(&buffer.message);
+    reply.command_id = central_command_id(&normalized);
     if (receiver->handler != NULL) {
-        if (receiver->handler(&buffer.message, &reply, receiver->context) != 0) {
+        if (receiver->handler(&normalized, &reply, receiver->context) != 0) {
             reply.status = -1;
         }
-    } else if (buffer.message.header.type != MSG_HEARTBEAT) {
+    } else if (normalized.header.type != MSG_HEARTBEAT) {
         reply.status = -1;
     }
     central_timestamp(reply.timestamp, sizeof(reply.timestamp));

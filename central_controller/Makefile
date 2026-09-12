@@ -1,4 +1,5 @@
 ARTIFACT = central_controller
+.DEFAULT_GOAL := all
 
 #Build architecture/variant string, possible values: x86, armv7le, etc...
 PLATFORM ?= x86_64
@@ -9,6 +10,9 @@ BUILD_PROFILE ?= debug
 CONFIG_NAME ?= $(PLATFORM)-$(BUILD_PROFILE)
 OUTPUT_DIR = build/$(CONFIG_NAME)
 TARGET = $(OUTPUT_DIR)/$(ARTIFACT)
+UI_TARGET = $(OUTPUT_DIR)/central_ui
+
+.DEFAULT_GOAL := all
 
 #Compiler definitions
 
@@ -46,10 +50,12 @@ DEPS = -Wp,-MMD,$(@:%.o=%.d),-MT,$@
 rwildcard = $(wildcard $(addprefix $1/*.,$2)) $(foreach d,$(wildcard $1/*),$(call rwildcard,$d,$2))
 
 #Source list
-SRCS = $(call rwildcard, src, c)
+SRCS = $(filter-out src/central_ui.c,$(call rwildcard, src, c))
+UI_SRCS = src/central_ui.c src/ui_ipc.c
 
 #Object files list
 OBJS = $(addprefix $(OUTPUT_DIR)/,$(addsuffix .o, $(basename $(SRCS))))
+UI_OBJS = $(addprefix $(OUTPUT_DIR)/,$(addsuffix .o, $(basename $(UI_SRCS))))
 
 #Compiling rule
 $(OUTPUT_DIR)/%.o: %.c
@@ -60,8 +66,11 @@ $(OUTPUT_DIR)/%.o: %.c
 $(TARGET):$(OBJS)
 	$(LD) -o $(TARGET) $(LDFLAGS_all) $(LDFLAGS) $(OBJS) $(LIBS_all) $(LIBS)
 
+$(UI_TARGET):$(UI_OBJS)
+	$(LD) -o $(UI_TARGET) $(LDFLAGS_all) $(LDFLAGS) $(UI_OBJS) $(LIBS_all) $(LIBS)
+
 #Rules section for default compilation and linking
-all: $(TARGET)
+all: $(TARGET) $(UI_TARGET)
 
 clean:
 	rm -fr $(OUTPUT_DIR)
@@ -69,4 +78,4 @@ clean:
 rebuild: clean all
 
 #Inclusion of dependencies (object files to source and includes)
--include $(OBJS:%.o=%.d)
+-include $(sort $(OBJS:%.o=%.d) $(UI_OBJS:%.o=%.d))
