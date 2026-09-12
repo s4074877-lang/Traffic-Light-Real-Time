@@ -351,15 +351,15 @@ static void cx_send_preempt(crossing_t *cx)
     if (connection_is_connected(&state.local_conn))
     {
         // Build and send railway preempt message
-        railway_msg_t msg;
+        railway_full_msg_t msg;
         memset(&msg, 0, sizeof(msg));
         msg.header.type = MSG_RAILWAY_PREEMPT;
         msg.header.src = CONTROLLER_TRAIN;
         msg.header.dst = CONTROLLER_LOCAL;
         get_timestamp(msg.header.timestamp, sizeof(msg.header.timestamp));
-        msg.intersection_id = cx->id;
-        msg.active = 1;
-        msg.eta_seconds = GATE_CLOSE_DELAY_SEC + 5;
+        msg.payload.intersection_id = cx->id;
+        msg.payload.active = 1;
+        msg.payload.eta_seconds = GATE_CLOSE_DELAY_SEC + 5;
 
         reply_t reply;
         if (MsgSend(state.local_conn.coid, &msg, sizeof(msg), &reply, sizeof(reply)) == -1)
@@ -385,15 +385,15 @@ static void cx_send_clear(crossing_t *cx)
     // Send TRAIN_CLEAR to Local controller
     if (connection_is_connected(&state.local_conn))
     {
-        railway_msg_t msg;
+        railway_full_msg_t msg;
         memset(&msg, 0, sizeof(msg));
         msg.header.type = MSG_TRAIN_CLEAR;
         msg.header.src = CONTROLLER_TRAIN;
         msg.header.dst = CONTROLLER_LOCAL;
         get_timestamp(msg.header.timestamp, sizeof(msg.header.timestamp));
-        msg.intersection_id = cx->id;
-        msg.active = 0;
-        msg.eta_seconds = 0;
+        msg.payload.intersection_id = cx->id;
+        msg.payload.active = 0;
+        msg.payload.eta_seconds = 0;
 
         reply_t reply;
         if (MsgSend(state.local_conn.coid, &msg, sizeof(msg), &reply, sizeof(reply)) == -1)
@@ -418,16 +418,16 @@ static void cx_fault_alert(crossing_t *cx, cx_fault_t fault)
     // Send FAULT_ALERT to Central
     if (connection_is_connected(&state.central_conn))
     {
-        fault_msg_t msg;
+        fault_full_msg_t msg;
         memset(&msg, 0, sizeof(msg));
         msg.header.type = MSG_FAULT_ALERT;
         msg.header.src = CONTROLLER_TRAIN;
         msg.header.dst = CONTROLLER_CENTRAL;
         get_timestamp(msg.header.timestamp, sizeof(msg.header.timestamp));
-        msg.intersection_id = cx->id;
-        msg.fault_type = FAULT_GATE;
-        msg.severity = SEV_CRITICAL;
-        snprintf(msg.description, sizeof(msg.description), "%s: %s",
+        msg.payload.source_id = cx->id;
+        msg.payload.fault_type = FAULT_GATE;
+        msg.payload.severity = SEV_CRITICAL;
+        snprintf(msg.payload.description, sizeof(msg.payload.description), "%s: %s",
                  cx->name, cx_fault_str(fault));
 
         reply_t reply;
@@ -527,34 +527,34 @@ static void send_railway_status(void)
     {
         crossing_t *cx = &crossings[i];
 
-        railway_status_msg_t msg;
+        railway_status_full_msg_t msg;
         memset(&msg, 0, sizeof(msg));
         msg.header.type = MSG_RAILWAY_STATUS;
         msg.header.src = CONTROLLER_TRAIN;
         msg.header.dst = CONTROLLER_CENTRAL;
         get_timestamp(msg.header.timestamp, sizeof(msg.header.timestamp));
-        msg.crossing_id = cx->id;
+        msg.payload.crossing_id = cx->id;
 
         // Determine train state from track states
         if (cx->track[CX_TRACK_UP] == CX_TRACK_ON_CROSSING || cx->track[CX_TRACK_DOWN] == CX_TRACK_ON_CROSSING)
         {
-            msg.train_state = TRAIN_AT_CROSSING;
+            msg.payload.train_state = TRAIN_AT_CROSSING;
         }
         else if (cx->track[CX_TRACK_UP] == CX_TRACK_APPROACHING || cx->track[CX_TRACK_DOWN] == CX_TRACK_APPROACHING)
         {
-            msg.train_state = TRAIN_APPROACHING;
+            msg.payload.train_state = TRAIN_APPROACHING;
         }
         else if (cx->track[CX_TRACK_UP] == CX_TRACK_CLEARED || cx->track[CX_TRACK_DOWN] == CX_TRACK_CLEARED)
         {
-            msg.train_state = TRAIN_CLEAR;
+            msg.payload.train_state = TRAIN_CLEAR;
         }
         else
         {
-            msg.train_state = TRAIN_NONE;
+            msg.payload.train_state = TRAIN_NONE;
         }
 
-        msg.gate_state = cx->gate;
-        msg.fault = (cx->fault != CX_FAULT_NONE) ? FAULT_GATE : FAULT_NONE;
+        msg.payload.gate_state = cx->gate;
+        msg.payload.fault = (cx->fault != CX_FAULT_NONE) ? FAULT_GATE : FAULT_NONE;
 
         reply_t reply;
         MsgSend(state.central_conn.coid, &msg, sizeof(msg), &reply, sizeof(reply));

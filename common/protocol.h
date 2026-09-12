@@ -320,6 +320,41 @@ typedef struct {
 } display_update_msg_t;
 
 // ============================================
+// Full message types (header + payload)
+// ============================================
+// Use these for MsgSend() when you need both header and payload
+
+typedef struct {
+    msg_header_t header;
+    railway_msg_t payload;
+} railway_full_msg_t;
+
+typedef struct {
+    msg_header_t header;
+    fault_msg_t payload;
+} fault_full_msg_t;
+
+typedef struct {
+    msg_header_t header;
+    railway_status_msg_t payload;
+} railway_status_full_msg_t;
+
+typedef struct {
+    msg_header_t header;
+    status_msg_t payload;
+} status_full_msg_t;
+
+typedef struct {
+    msg_header_t header;
+    heartbeat_msg_t payload;
+} heartbeat_full_msg_t;
+
+typedef struct {
+    msg_header_t header;
+    mode_cmd_msg_t payload;
+} mode_cmd_full_msg_t;
+
+// ============================================
 // Receive buffer
 // ============================================
 // Use this as the MsgReceive() buffer, then switch on msg.header.type
