@@ -42,18 +42,7 @@ int connection_try_connect(connection_t *conn) {
         return 1;  // Newly connected
     }
 
-    // Connection failed - print waiting message once
-    pthread_mutex_lock(conn->mutex);
-    if (!conn->connection_msg_printed) {
-        char ts[32];
-        get_timestamp(ts, sizeof(ts));
-        printf("%s[%s] Waiting connection to %s%s\n",
-               COLOR_YELLOW, ts, conn->service_path, COLOR_RESET);
-        fflush(stdout);
-        conn->connection_msg_printed = 1;
-    }
-    pthread_mutex_unlock(conn->mutex);
-
+    // Connection failed - silently retry
     return 0;  // Not connected
 }
 

@@ -19,7 +19,7 @@
 #define LOCAL_SERVER_PREFIX "local"   // e.g. "local1" .. "local6"
 
 // Railway-affected intersection pairs (from the map):
-//   P1 -> I1, I2      P2 -> I3, I4      P3 -> I5, I6
+//   P1 -> I1, I2      P2 -> I3, I4      P3 -> I5, I6 (UP W->E, DOWN E->W)
 
 // ============================================
 // Timing constants (seconds) - design assumptions

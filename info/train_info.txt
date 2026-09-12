@@ -1,0 +1,273 @@
+boomgate-red_flashing_light
+min time between trains 2 minutes apart
+infreqnet min 20 minutes apart
+boomgate(error)->train light (red)
+
+
+train-status
+    update every secondo to the central train_controller
+
+train-corssing
+    train(nearboomgate)-> boomgate send signal -> local
+    bombageate[fault]->signa to train light (stop)
+
+central->train_controller
+    (test)sending signal testing the train is approaching
+    (test)sending signal control boomgate (simulatef fault)
+
+
+train-ui
+============================================================
+                    TRAIN CONTROLLER STATUS
+============================================================
+
+CONNECTION STATUS
+------------------------------------------------------------
+LOCAL INTERSECTION : [CONNECTED]       Last Update: [HH:MM:SS]
+CENTRAL CONTROLLER : [CONNECTED]       Last Update: [HH:MM:SS]
+
+TRAIN LIGHT        : [ON]
+
+------------------------------------------------------------
+INTERSECTION STATUS
+------------------------------------------------------------
+
+Intersection ID: P1
+    Boom Gate Activity : [OPEN / CLOSING / CLOSED]
+    Train              : [NONE / APPROACHING / CLEAR]
+
+Intersection ID: P2
+    Boom Gate Activity : [OPEN / CLOSING / CLOSED]
+    Train              : [NONE / APPROACHING / CLEAR]
+
+Intersection ID: P3
+    Boom Gate Activity : [OPEN / CLOSING / CLOSED]
+    Train              : [NONE / APPROACHING / CLEAR]
+
+------------------------------------------------------------
+MESSAGE STATUS
+------------------------------------------------------------
+Last Message Sent     : [HH:MM:SS]  [MESSAGE_TYPE]
+Last Message Received : [HH:MM:SS]  [MESSAGE_TYPE]
+
+============================================================
+
+
+RAILWAY SUBSYSTEM NOTES
+============================================================
+
+1. SCOPE / AUTHORITY
+------------------------------------------------------------
+- Railway subsystem owns: train detection, road flashing lights,
+  boom gates, train signal, gate fault detection.
+- Local Controllers (I1–I6) only OBSERVE railway state; they never
+  command gates, flashing lights or train signals.
+- Central only monitors and sends operator/test commands.
+- Railway keeps operating safely if Central or any link is down.
+
+Crossing → affected intersections
+    P1 → I1, I2
+    P2 → I3, I4
+    P3 → I5, I6
+
+2. EQUIPMENT PER CROSSING
+------------------------------------------------------------
+- 2 tracks: UP and DOWN (one direction each)
+- Boom gate (with position sensor)
+- Road flashing red lights (warn cars)
+- Train signal (tells train STOP / PROCEED)  ← not the same as road lights
+
+3. STATES
+------------------------------------------------------------
+Track (each track separately):
+    NONE → APPROACHING → ON_CROSSING → CLEARED → NONE
+Boom gate:
+    OPEN / CLOSING / CLOSED / OPENING / FAULT
+Road flashing lights:
+    ON / OFF
+Train signal:
+    PROCEED / STOP
+
+4. TRAIN FREQUENCY
+------------------------------------------------------------
+- Peak: min 2 min (120 s) between trains on the same line
+- Night (~10 pm): about 20 min apart
+- Fri/Sat: all-night trains
+- Mode selected by Central command (or time-of-day schedule)
+- Time-scale factor for demo (e.g. x10), allowed by brief
+- NOTE: 2 min gap is per line. UP and DOWN trains can overlap
+  at the same crossing.
+
+5. NORMAL CROSSING SEQUENCE (times relative to train arrival T)
+------------------------------------------------------------
+T-30 s  Train detected → track = APPROACHING
+        Road flashing lights ON
+        Send RAILWAY_PREEMPT to affected Local Controllers (pulse)
+        Send RAILWAY_STATUS to Central
+T-25 s  Gate CLOSING                              (proposed)
+T-17 s  Gate CLOSED (8 s closing)                 (proposed)
+        Train signal = PROCEED only if gate CLOSED
+T       Train enters → track = ON_CROSSING
+T+15 s  Train leaves → track = CLEARED            (proposed)
+        IF other track is NONE/CLEARED:
+            Gate OPENING (8 s)                    (proposed)
+            Gate OPEN → flashing lights OFF
+            Send TRAIN_CLEAR to affected Local Controllers
+        ELSE keep gate CLOSED until both tracks clear
+Local Controller then holds red 2 s recovery before normal cycle.
+
+Service window check (report B.11):
+    120 s − 2 s recovery − 30 s pre-emption = 88 s = two 44 s cycles
+
+6. DOUBLE-TRACK RULES
+------------------------------------------------------------
+- Gate opens only when BOTH tracks are NONE or CLEARED.
+- Train approaches while gate OPENING → close gate again,
+  flashing lights stay ON, do NOT send TRAIN_CLEAR.
+- Train approaches after TRAIN_CLEAR already sent → send a new
+  RAILWAY_PREEMPT (full sequence again).
+
+7. BOOM GATE FAULTS
+------------------------------------------------------------
+Fault types:
+    GATE_CLOSE_TIMEOUT  gate not CLOSED within 12 s   (proposed)
+    GATE_OPEN_TIMEOUT   gate not OPEN within 12 s     (proposed)
+    GATE_SENSOR_MISMATCH  sensor disagrees with expected position
+    (test) injected fault from Central
+
+On any gate fault (railway subsystem does ALL of this itself,
+does not wait for Central):
+    1. Gate state = FAULT
+    2. Train signal = STOP immediately
+    3. Road flashing lights stay ON
+    4. Affected Local Controllers hold railway-feeding movements RED
+       (no TRAIN_CLEAR is sent while fault is active)
+    5. Send FAULT_ALERT to Central (buffer + resend if link down)
+
+Fault recovery:
+    1. Operator sends RESET_FAULT from Central
+    2. Railway runs gate check (close → open) and confirms healthy
+    3. Train signal back to PROCEED
+    4. Send RAILWAY_STATUS (fault cleared) to Central
+    5. Send TRAIN_CLEAR to Local Controllers only if both tracks clear
+
+8. STATUS / HEARTBEAT
+------------------------------------------------------------
+To Central:
+    RAILWAY_STATUS every 1 s + immediately on any state change
+To Local Controllers:
+    RAILWAY_HEARTBEAT every 500 ms                  (proposed)
+    Local declares railway state stale after 3 misses (1.5 s)
+    → holds railway-feeding movements RED until fresh state
+    (must be tighter than Central's 3 s timeout, report D.5)
+
+Link failures:
+    Central link lost → railway continues normally, faults buffered,
+                        full status sent on reconnect
+    Local link lost   → railway continues normally, Local holds RED
+
+9. CENTRAL → RAILWAY COMMANDS
+------------------------------------------------------------
+Test:
+    CMD_SIM_TRAIN        (crossing ID, track UP/DOWN)
+    CMD_SIM_GATE_FAULT   (crossing ID, fault type)
+Operator:
+    CMD_RESET_FAULT      (crossing ID)
+    CMD_SET_FREQUENCY    (PEAK / NIGHT / ALL_NIGHT)
+Every command gets CMD_ACK (accepted / rejected + reason).
+Railway may reject unsafe commands (e.g. reset while gate still faulty).
+
+10. MESSAGES
+------------------------------------------------------------
+RAILWAY_PREEMPT    Railway → Local (pulse, highest priority)
+TRAIN_CLEAR        Railway → Local
+RAILWAY_HEARTBEAT  Railway → Local
+RAILWAY_STATUS     Railway → Central
+FAULT_ALERT        Railway → Central
+CMD_*              Central → Railway
+CMD_ACK            Railway → Central
+
+11. PROCESSES (railway node)
+------------------------------------------------------------
+rw_core     Train simulation + crossing state machine for P1–P3
+rw_gate     Gate simulation + fault injection + timeout detection
+rw_comm     Links to Central and Local Controllers
+            (acts as the "train line controller" in report §1.2.1)
+rw_display  Terminal UI only, receives state from rw_core
+
+12. UI (rw_display)
+------------------------------------------------------------
+============================================================
+                 RAILWAY CONTROLLER STATUS
+============================================================
+CONNECTIONS
+------------------------------------------------------------
+CENTRAL            : [CONNECTED]   Last HB: [HH:MM:SS]
+LOCAL I1..I6       : I1[OK] I2[OK] I3[OK] I4[LOST] I5[OK] I6[OK]
+Train frequency    : [PEAK 2 min / NIGHT 20 min]   Time scale: [x10]
+
+------------------------------------------------------------
+CROSSING P1  (affects I1, I2)
+    Track UP (W->S)   : [NONE / APPROACHING / ON_CROSSING / CLEARED]
+    Track DOWN (S->W) : [NONE / APPROACHING / ON_CROSSING / CLEARED]
+    Boom Gate         : [OPEN / CLOSING / CLOSED / OPENING / FAULT]
+    Road Flash        : [ON / OFF]
+    Train Sig         : [PROCEED / STOP]
+    Fault             : [NONE / GATE_CLOSE_TIMEOUT / ...]
+    Preempt           : [SENT HH:MM:SS]   Clear: [SENT HH:MM:SS]
+
+CROSSING P2  (affects I3, I4)   ...
+CROSSING P3  (affects I5, I6)   ...
+
+------------------------------------------------------------
+MESSAGES
+------------------------------------------------------------
+Last Sent     : [HH:MM:SS] [TYPE] -> [DEST]
+Last Received : [HH:MM:SS] [TYPE] <- [SRC]
+Active Faults : [count]
+============================================================
+
+13. OPEN ITEMS – FIX IN REPORT
+------------------------------------------------------------
+[ ] Yellow/All-Red: §7.1.3 + TC-15 say Yellow 2 s, no All-Red;
+    §8.4.3 + ALL-IN-1 say Yellow 3 s + All-Red 2 s. Pick one,
+    then recheck 44 s cycle and 88 s window.
+[ ] Fail-safe: D.6/H11 say all RED + ped STOP; §8.5.3 says
+    flashing amber + ped dark. Recommend all RED (safer near rail).
+[ ] D.7 step 4 + §1.2.1: change so railway sets train STOP itself;
+    Central only receives the alarm.
+[ ] UC4 "TRAIN_CLEAR not received": hold RED, FAULT_ALERT after
+    X s, wait for trusted clear or operator reset.
+[ ] Update Message table (§9) with RAILWAY_HEARTBEAT, CMD_*, CMD_ACK.
+
+
+
+============================================================
+                 RAILWAY CONTROLLER STATUS
+============================================================
+CONNECTIONS
+------------------------------------------------------------
+CENTRAL            : [CONNECTED / LOST]   Last HB: [HH:MM:SS]
+LOCAL              : [CONNECTED / LOST]   Last HB: [HH:MM:SS]
+Train frequency    : [PEAK 2 min / NIGHT 20 min]   Time scale: [x10]
+Train Signal       : [PROCEED / STOP]
+
+------------------------------------------------------------
+CROSSING P1  (affects I1, I2)
+    Track UP (W->S)   : [NONE / APPROACHING / ON_CROSSING / CLEARED]
+    Track DOWN (S->W) : [NONE / APPROACHING / ON_CROSSING / CLEARED]
+    Boom Gate         : [OPEN / CLOSING / CLOSED / OPENING / FAULT]
+    Road Flash        : [ON / OFF]
+    Fault             : [NONE / GATE_CLOSE_TIMEOUT / ...]
+    Preempt           : [SENT HH:MM:SS]   Clear: [SENT HH:MM:SS]
+
+CROSSING P2  (affects I3, I4)   ...
+CROSSING P3  (affects I5, I6)   ...
+
+------------------------------------------------------------
+MESSAGES
+------------------------------------------------------------
+Last Sent     : [HH:MM:SS] [TYPE] -> [DEST]
+Last Received : [HH:MM:SS] [TYPE] <- [SRC]
+Active Faults : [count]
+============================================================

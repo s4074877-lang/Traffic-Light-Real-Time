@@ -102,7 +102,11 @@ static void display_ui(void) {
            state.last_send_train[0] ? state.last_send_train : "N/A");
 
     printf("%s==========================================================%s\n", COLOR_BOLD, COLOR_RESET);
-    printf("Commands: mode-fixed | mode-sensor | status | quit\n");
+    printf("Local: mode-fixed | mode-sensor\n");
+    printf("Train: train-up | train-down | train P# up/down\n");
+    printf("       p1-fault | p2-fault | p3-fault | reset P#\n");
+    printf("       test | test N | help\n");
+    printf("Other: status | quit\n");
     printf("%s==========================================================%s\n", COLOR_BOLD, COLOR_RESET);
     printf("\n%sMessage:%s ", COLOR_BOLD, COLOR_RESET);
     fflush(stdout);
@@ -310,6 +314,60 @@ static int send_mode_command(const char *mode) {
     return 0;
 }
 
+// Send command to train controller
+static int send_train_command(const char *cmd) {
+    pthread_mutex_lock(&state.mutex);
+    int connected = state.train_conn.connected;
+    pthread_mutex_unlock(&state.mutex);
+
+    if (!connected) {
+        printf("%sTrain controller not connected%s\n", COLOR_RED, COLOR_RESET);
+        return -1;
+    }
+
+    test_message_t msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.header.type = MSG_TEST;
+    msg.header.src = CONTROLLER_CENTRAL;
+    msg.header.dst = CONTROLLER_TRAIN;
+    copy_message_data(msg.data, sizeof(msg.data), cmd);
+    get_timestamp(msg.header.timestamp, sizeof(msg.header.timestamp));
+
+    reply_t reply;
+    if (send_message(&state.train_conn, &msg, &reply) != 0) {
+        printf("%sFailed to send train command%s\n", COLOR_RED, COLOR_RESET);
+        return -1;
+    }
+
+    printf("%sCommand sent to train: %s%s\n", COLOR_GREEN, cmd, COLOR_RESET);
+
+    pthread_mutex_lock(&state.mutex);
+    get_timestamp(state.last_send_train, sizeof(state.last_send_train));
+    state.ui_needs_update = 1;
+    pthread_mutex_unlock(&state.mutex);
+    return 0;
+}
+
+// Check if command is a train command
+static int is_train_command(const char *cmd) {
+    // Train simulation commands
+    if (strncmp(cmd, "train", 5) == 0) return 1;
+    if (strncmp(cmd, "noexit", 6) == 0) return 1;
+    if (strncmp(cmd, "stuck", 5) == 0) return 1;
+    if (strncmp(cmd, "fault", 5) == 0) return 1;
+    if (strncmp(cmd, "reset", 5) == 0) return 1;
+    if (strncmp(cmd, "test", 4) == 0) return 1;
+    if (strncmp(cmd, "scale", 5) == 0) return 1;
+    if (strcmp(cmd, "help") == 0) return 1;
+
+    // p#-fault format
+    if ((cmd[0] == 'p' || cmd[0] == 'P') &&
+        cmd[1] >= '1' && cmd[1] <= '3' &&
+        strncmp(cmd + 2, "-fault", 6) == 0) return 1;
+
+    return 0;
+}
+
 static int execute_command(const char *cmd) {
     if (strcmp(cmd, "mode-fixed") == 0) {
         return send_mode_command("FIXED");
@@ -318,9 +376,11 @@ static int execute_command(const char *cmd) {
     } else if (strcmp(cmd, "status") == 0) {
         display_ui();
         return 0;
+    } else if (is_train_command(cmd)) {
+        return send_train_command(cmd);
     }
 
-    printf("%sUnknown command. Use: mode-fixed | mode-sensor | status | quit%s\n",
+    printf("%sUnknown command. Type 'help' for train commands%s\n",
            COLOR_RED, COLOR_RESET);
     return -1;
 }

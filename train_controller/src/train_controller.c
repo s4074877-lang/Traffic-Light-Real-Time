@@ -4,12 +4,15 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <errno.h>
+#include <time.h>
 
 #include "../../common/common.h"
 #include "../../common/communication/connection.h"
 #include "../../common/communication/send.h"
 #include "../../common/communication/receive.h"
 #include "ui/train_ui.h"
+#include "crossing/crossing.h"
+#include "crossing/rail_sim.h"
 
 // Controller state
 typedef struct
@@ -36,6 +39,34 @@ typedef struct
 static train_controller_state_t state;
 static train_ui_state_t ui_state;
 static name_attach_t *attach = NULL;
+
+// Crossing state (P1, P2, P3)
+static crossing_t crossings[NUM_CROSSINGS];
+
+// Forward declarations for crossing callbacks
+static void cx_gate_command(crossing_t *cx, gate_command_t cmd);
+static void cx_set_flash(crossing_t *cx, bool on);
+static void cx_send_preempt(crossing_t *cx);
+static void cx_send_clear(crossing_t *cx);
+static void cx_fault_alert(crossing_t *cx, cx_fault_t fault);
+static void cx_start_timer(crossing_t *cx, timer_id_t timer_id, int seconds);
+static void cx_cancel_timer(crossing_t *cx, timer_id_t timer_id);
+static void cx_state_changed(crossing_t *cx);
+
+// Forward declaration for status sending
+static void send_railway_status(void);
+
+// Crossing operations callbacks
+static const cx_ops_t crossing_ops = {
+    .gate_command = cx_gate_command,
+    .set_flash = cx_set_flash,
+    .send_preempt = cx_send_preempt,
+    .send_clear = cx_send_clear,
+    .fault_alert = cx_fault_alert,
+    .start_timer = cx_start_timer,
+    .cancel_timer = cx_cancel_timer,
+    .state_changed = cx_state_changed
+};
 
 static void print_usage(const char *prog)
 {
@@ -95,6 +126,14 @@ static int handle_test_message(int rcvid, test_message_t *msg, reply_t *reply, v
         get_timestamp(s->last_central_update, sizeof(s->last_central_update));
         // Update UI state
         train_ui_set_connection(&ui_state, CONTROLLER_CENTRAL, CONN_CONNECTED, s->last_central_update);
+
+        // Process command if present in data
+        if (msg->data[0] != '\0')
+        {
+            char cmd_reply[256];
+            rail_sim_command(msg->data, cmd_reply, sizeof(cmd_reply));
+            // Log the command execution (could display on UI)
+        }
     }
     else if (msg->header.src == CONTROLLER_LOCAL)
     {
@@ -256,6 +295,274 @@ static void *heartbeat_thread(void *arg)
     return NULL;
 }
 
+// Thread to tick the simulator and send periodic status
+static void *sim_tick_thread(void *arg)
+{
+    (void)arg;
+    int status_counter = 0;
+
+    while (1)
+    {
+        // Tick simulator every SIM_TICK_MS
+        usleep(SIM_TICK_MS * 1000);
+        rail_sim_tick();
+
+        // Send status to Central every STATUS_REPORT_INTERVAL_SEC
+        status_counter++;
+        if (status_counter >= (STATUS_REPORT_INTERVAL_SEC * 1000 / SIM_TICK_MS))
+        {
+            send_railway_status();
+            status_counter = 0;
+        }
+    }
+
+    return NULL;
+}
+
+// ============================================
+// Crossing Callback Implementations
+// ============================================
+
+static void cx_gate_command(crossing_t *cx, gate_command_t cmd)
+{
+    // Forward to simulator
+    rail_sim_gate_command(cx, cmd);
+}
+
+static void cx_set_flash(crossing_t *cx, bool on)
+{
+    int idx = cx->id - 1;
+    if (idx >= 0 && idx < NUM_CROSSINGS)
+    {
+        // Only update flash state, don't touch other fields
+        pthread_mutex_lock(&ui_state.mutex);
+        ui_state.crossings[idx].road_flash = on ? FLASH_ON : FLASH_OFF;
+        ui_state.needs_update = 1;
+        pthread_mutex_unlock(&ui_state.mutex);
+    }
+}
+
+static void cx_send_preempt(crossing_t *cx)
+{
+    char timestamp[32];
+    get_timestamp(timestamp, sizeof(timestamp));
+
+    // Send RAILWAY_PREEMPT to Local controller
+    if (connection_is_connected(&state.local_conn))
+    {
+        // Build and send railway preempt message
+        railway_msg_t msg;
+        memset(&msg, 0, sizeof(msg));
+        msg.header.type = MSG_RAILWAY_PREEMPT;
+        msg.header.src = CONTROLLER_TRAIN;
+        msg.header.dst = CONTROLLER_LOCAL;
+        get_timestamp(msg.header.timestamp, sizeof(msg.header.timestamp));
+        msg.intersection_id = cx->id;
+        msg.active = 1;
+        msg.eta_seconds = GATE_CLOSE_DELAY_SEC + 5;
+
+        reply_t reply;
+        if (MsgSend(state.local_conn.coid, &msg, sizeof(msg), &reply, sizeof(reply)) == -1)
+        {
+            // Connection lost
+            train_ui_set_connection(&ui_state, CONTROLLER_LOCAL, CONN_LOST, timestamp);
+        }
+        else
+        {
+            train_ui_set_last_sent(&ui_state, timestamp, "PREEMPT", "LOCAL");
+        }
+    }
+
+    // Update UI with preempt time
+    train_ui_set_preempt_time(&ui_state, cx->id - 1, timestamp);
+}
+
+static void cx_send_clear(crossing_t *cx)
+{
+    char timestamp[32];
+    get_timestamp(timestamp, sizeof(timestamp));
+
+    // Send TRAIN_CLEAR to Local controller
+    if (connection_is_connected(&state.local_conn))
+    {
+        railway_msg_t msg;
+        memset(&msg, 0, sizeof(msg));
+        msg.header.type = MSG_TRAIN_CLEAR;
+        msg.header.src = CONTROLLER_TRAIN;
+        msg.header.dst = CONTROLLER_LOCAL;
+        get_timestamp(msg.header.timestamp, sizeof(msg.header.timestamp));
+        msg.intersection_id = cx->id;
+        msg.active = 0;
+        msg.eta_seconds = 0;
+
+        reply_t reply;
+        if (MsgSend(state.local_conn.coid, &msg, sizeof(msg), &reply, sizeof(reply)) == -1)
+        {
+            train_ui_set_connection(&ui_state, CONTROLLER_LOCAL, CONN_LOST, timestamp);
+        }
+        else
+        {
+            train_ui_set_last_sent(&ui_state, timestamp, "CLEAR", "LOCAL");
+        }
+    }
+
+    // Update UI with clear time
+    train_ui_set_clear_time(&ui_state, cx->id - 1, timestamp);
+}
+
+static void cx_fault_alert(crossing_t *cx, cx_fault_t fault)
+{
+    char timestamp[32];
+    get_timestamp(timestamp, sizeof(timestamp));
+
+    // Send FAULT_ALERT to Central
+    if (connection_is_connected(&state.central_conn))
+    {
+        fault_msg_t msg;
+        memset(&msg, 0, sizeof(msg));
+        msg.header.type = MSG_FAULT_ALERT;
+        msg.header.src = CONTROLLER_TRAIN;
+        msg.header.dst = CONTROLLER_CENTRAL;
+        get_timestamp(msg.header.timestamp, sizeof(msg.header.timestamp));
+        msg.intersection_id = cx->id;
+        msg.fault_type = FAULT_GATE;
+        msg.severity = SEV_CRITICAL;
+        snprintf(msg.description, sizeof(msg.description), "%s: %s",
+                 cx->name, cx_fault_str(fault));
+
+        reply_t reply;
+        if (MsgSend(state.central_conn.coid, &msg, sizeof(msg), &reply, sizeof(reply)) == -1)
+        {
+            train_ui_set_connection(&ui_state, CONTROLLER_CENTRAL, CONN_LOST, timestamp);
+        }
+        else
+        {
+            train_ui_set_last_sent(&ui_state, timestamp, "FAULT", "CENTRAL");
+        }
+    }
+
+    // Update UI fault count
+    int fault_count = 0;
+    for (int i = 0; i < NUM_CROSSINGS; i++)
+    {
+        if (crossings[i].fault != CX_FAULT_NONE)
+        {
+            fault_count++;
+        }
+    }
+    train_ui_set_active_faults(&ui_state, fault_count);
+
+    // Update train signal if any fault
+    train_ui_set_signal(&ui_state, crossing_any_fault(crossings, NUM_CROSSINGS) ? SIGNAL_STOP : SIGNAL_PROCEED);
+}
+
+static void cx_start_timer(crossing_t *cx, timer_id_t timer_id, int seconds)
+{
+    rail_sim_start_timer(cx, timer_id, seconds);
+}
+
+static void cx_cancel_timer(crossing_t *cx, timer_id_t timer_id)
+{
+    rail_sim_cancel_timer(cx, timer_id);
+}
+
+static void cx_state_changed(crossing_t *cx)
+{
+    int idx = cx->id - 1;
+    if (idx >= 0 && idx < NUM_CROSSINGS)
+    {
+        // Update UI with current crossing state
+        train_ui_set_track_state(&ui_state, idx, TRACK_UP, (track_state_t)cx->track[CX_TRACK_UP]);
+        train_ui_set_track_state(&ui_state, idx, TRACK_DOWN, (track_state_t)cx->track[CX_TRACK_DOWN]);
+        train_ui_set_gate_state(&ui_state, idx, cx->gate);
+
+        // Map crossing fault to UI fault type
+        crossing_fault_t ui_fault = CROSSING_FAULT_NONE;
+        switch (cx->fault)
+        {
+        case CX_FAULT_GATE_CLOSE_TIMEOUT:
+            ui_fault = CROSSING_FAULT_GATE_CLOSE_TIMEOUT;
+            break;
+        case CX_FAULT_GATE_OPEN_TIMEOUT:
+            ui_fault = CROSSING_FAULT_GATE_OPEN_TIMEOUT;
+            break;
+        default:
+            if (cx->fault != CX_FAULT_NONE)
+            {
+                ui_fault = CROSSING_FAULT_GATE_CLOSE_TIMEOUT; // Generic fault display
+            }
+            break;
+        }
+        train_ui_set_crossing_fault(&ui_state, idx, ui_fault);
+
+        // Update train signal and fault count
+        int fault_count = 0;
+        for (int i = 0; i < NUM_CROSSINGS; i++)
+        {
+            if (crossings[i].fault != CX_FAULT_NONE)
+            {
+                fault_count++;
+            }
+        }
+        train_ui_set_active_faults(&ui_state, fault_count);
+        train_ui_set_signal(&ui_state, fault_count > 0 ? SIGNAL_STOP : SIGNAL_PROCEED);
+
+        // Request UI update
+        train_ui_request_update(&ui_state);
+    }
+}
+
+// Send railway status to Central (called periodically)
+static void send_railway_status(void)
+{
+    char timestamp[32];
+    get_timestamp(timestamp, sizeof(timestamp));
+
+    if (!connection_is_connected(&state.central_conn))
+    {
+        return;
+    }
+
+    for (int i = 0; i < NUM_CROSSINGS; i++)
+    {
+        crossing_t *cx = &crossings[i];
+
+        railway_status_msg_t msg;
+        memset(&msg, 0, sizeof(msg));
+        msg.header.type = MSG_RAILWAY_STATUS;
+        msg.header.src = CONTROLLER_TRAIN;
+        msg.header.dst = CONTROLLER_CENTRAL;
+        get_timestamp(msg.header.timestamp, sizeof(msg.header.timestamp));
+        msg.crossing_id = cx->id;
+
+        // Determine train state from track states
+        if (cx->track[CX_TRACK_UP] == CX_TRACK_ON_CROSSING || cx->track[CX_TRACK_DOWN] == CX_TRACK_ON_CROSSING)
+        {
+            msg.train_state = TRAIN_AT_CROSSING;
+        }
+        else if (cx->track[CX_TRACK_UP] == CX_TRACK_APPROACHING || cx->track[CX_TRACK_DOWN] == CX_TRACK_APPROACHING)
+        {
+            msg.train_state = TRAIN_APPROACHING;
+        }
+        else if (cx->track[CX_TRACK_UP] == CX_TRACK_CLEARED || cx->track[CX_TRACK_DOWN] == CX_TRACK_CLEARED)
+        {
+            msg.train_state = TRAIN_CLEAR;
+        }
+        else
+        {
+            msg.train_state = TRAIN_NONE;
+        }
+
+        msg.gate_state = cx->gate;
+        msg.fault = (cx->fault != CX_FAULT_NONE) ? FAULT_GATE : FAULT_NONE;
+
+        reply_t reply;
+        MsgSend(state.central_conn.coid, &msg, sizeof(msg), &reply, sizeof(reply));
+    }
+
+    train_ui_set_last_sent(&ui_state, timestamp, "RLY_STATUS", "CENTRAL");
+}
+
 // Execute command
 static int execute_command(const char *cmd)
 {
@@ -321,8 +628,24 @@ static int execute_command(const char *cmd)
     }
     else
     {
-        printf("%sUnknown command. Use: send-central | send-local%s\n", COLOR_RED, COLOR_RESET);
-        return -1;
+        // Try as a crossing/simulator command
+        char reply[512];
+        if (rail_sim_command(cmd, reply, sizeof(reply)))
+        {
+            printf("%s%s%s\n", COLOR_GREEN, reply, COLOR_RESET);
+            return 0;
+        }
+        else if (strncmp(reply, "ERROR:", 6) == 0)
+        {
+            printf("%s%s%s\n", COLOR_RED, reply, COLOR_RESET);
+            return -1;
+        }
+        else
+        {
+            // Command was recognized but returned info/warning
+            printf("%s\n", reply);
+            return 0;
+        }
     }
 
     return 0;
@@ -354,6 +677,15 @@ int main(int argc, char *argv[])
     // Initialize UI state
     train_ui_init(&ui_state);
 
+    // Initialize crossings (P1, P2, P3)
+    crossing_init(&crossings[0], 1, "P1", 1, 2, &crossing_ops, &state);  // P1 affects I1, I2
+    crossing_init(&crossings[1], 2, "P2", 3, 4, &crossing_ops, &state);  // P2 affects I3, I4
+    crossing_init(&crossings[2], 3, "P3", 5, 6, &crossing_ops, &state);  // P3 affects I5, I6
+
+    // Initialize rail simulator
+    rail_sim_init(crossings, NUM_CROSSINGS, DEFAULT_TIME_SCALE);
+    train_ui_set_time_scale(&ui_state, DEFAULT_TIME_SCALE);
+
     // Register with name service
     attach = connection_register_service(TRAIN_SERVICE_NAME, mode);
     if (attach == NULL)
@@ -367,7 +699,7 @@ int main(int argc, char *argv[])
                  sizeof(handlers) / sizeof(handlers[0]), &state);
 
     // Start threads
-    pthread_t msg_thread, conn_thread, ui_thread, hb_thread;
+    pthread_t msg_thread, conn_thread, ui_thread, hb_thread, sim_thread;
 
     if (pthread_create(&msg_thread, NULL, message_handler_thread, &recv_ctx) != 0)
     {
@@ -390,6 +722,12 @@ int main(int argc, char *argv[])
     if (pthread_create(&hb_thread, NULL, heartbeat_thread, NULL) != 0)
     {
         fprintf(stderr, "Failed to create heartbeat thread\n");
+        return EXIT_FAILURE;
+    }
+
+    if (pthread_create(&sim_thread, NULL, sim_tick_thread, NULL) != 0)
+    {
+        fprintf(stderr, "Failed to create simulator tick thread\n");
         return EXIT_FAILURE;
     }
 
@@ -472,6 +810,7 @@ int main(int argc, char *argv[])
     }
 
     // Cleanup
+    rail_sim_destroy();
     connection_close(&state.central_conn);
     connection_close(&state.local_conn);
     connection_unregister_service(attach);
