@@ -34,7 +34,7 @@ CCFLAGS_profile += -g -O0 -finstrument-functions
 LIBS_profile += -lprofilingS
 
 #Generic compiler flags (which include build type flags)
-CCFLAGS_all += -Wall -fmessage-length=0
+CCFLAGS_all += -std=gnu11 -Wall -Wextra -Werror -fmessage-length=0
 CCFLAGS_all += $(CCFLAGS_$(BUILD_PROFILE))
 #Shared library has to be compiled with -fPIC
 #CCFLAGS_all += -fPIC
@@ -48,12 +48,6 @@ rwildcard = $(wildcard $(addprefix $1/*.,$2)) $(foreach d,$(wildcard $1/*),$(cal
 #Source list
 SRCS = $(call rwildcard, src, c)
 
-#Communication module sources
-COMM_SRCS = ../common/communication/connection.c \
-            ../common/communication/send.c \
-            ../common/communication/receive.c
-COMM_OBJS = $(addprefix $(OUTPUT_DIR)/,$(notdir $(COMM_SRCS:.c=.o)))
-
 #Object files list
 OBJS = $(addprefix $(OUTPUT_DIR)/,$(addsuffix .o, $(basename $(SRCS))))
 
@@ -62,14 +56,9 @@ $(OUTPUT_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) -c $(DEPS) -o $@ $(INCLUDES) $(CCFLAGS_all) $(CCFLAGS) $<
 
-#Compiling rule for communication module
-$(OUTPUT_DIR)/%.o: ../common/communication/%.c
-	@mkdir -p $(dir $@)
-	$(CC) -c $(DEPS) -o $@ $(INCLUDES) $(CCFLAGS_all) $(CCFLAGS) $<
-
 #Linking rule
-$(TARGET):$(OBJS) $(COMM_OBJS)
-	$(LD) -o $(TARGET) $(LDFLAGS_all) $(LDFLAGS) $(OBJS) $(COMM_OBJS) $(LIBS_all) $(LIBS)
+$(TARGET):$(OBJS)
+	$(LD) -o $(TARGET) $(LDFLAGS_all) $(LDFLAGS) $(OBJS) $(LIBS_all) $(LIBS)
 
 #Rules section for default compilation and linking
 all: $(TARGET)
