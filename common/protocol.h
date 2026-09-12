@@ -14,7 +14,7 @@
 #define NUM_CROSSINGS       3   // P1 - P3 (boom gate locations)
 
 // Railway-affected intersection pairs (from the map):
-//   P1 -> I1, I2      P2 -> I3, I4      P3 -> I5, I6
+//   P1 -> I1, I2      P2 -> I3, I4      P3 -> I5, I6 (UP W->E, DOWN E->W)
 
 // ============================================
 // Timing constants (seconds) - design assumptions
