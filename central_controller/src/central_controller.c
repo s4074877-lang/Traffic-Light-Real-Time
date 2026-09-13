@@ -153,7 +153,12 @@ static const char *request_name(request_state_t value) {
 }
 
 static void describe_command(const test_message_t *message, char *text, size_t size) {
-    if (message->header.type == MSG_TEST) {
+    central_sim_command_t simulation;
+    if (central_simulation_decode(message, &simulation)) {
+        if (simulation.action == CENTRAL_SIM_TIME)
+            snprintf(text, size, "sim-time %02u:%02u", simulation.minute / 60, simulation.minute % 60);
+        else snprintf(text, size, "%s", simulation.action == CENTRAL_SIM_START ? "sim-start" : "sim-stop");
+    } else if (message->header.type == MSG_TEST) {
         snprintf(text, size, "train-sim %.63s", message->data);
     } else if (message->header.type == MSG_MODE_COMMAND) {
         mode_cmd_msg_t command;
@@ -205,6 +210,8 @@ static void print_help(void) {
            "  mode-sensor [I1..I6|all]\n"
            "  mode-temp <I1..I6|all> <fixed|sensor> <seconds>\n"
            "  mode-revert <I1..I6|all>\n"
+           "  sim-start <I1..I6|all> | sim-stop <I1..I6|all>\n"
+           "  sim-time <I1..I6|all> <HH:MM>\n"
            "  coordinate <I1..I6|all> <NS|EW> <offset 0..43>\n"
            "  coordinate-at <delay 1..3600s> <I1..I6|all> <NS|EW> <offset 0..43>\n"
            "  train-cmd <train-up|train-down|train P# up/down|noexit P# up/down>\n"
@@ -215,7 +222,11 @@ static void print_help(void) {
            "Queued commands expire after %u seconds. ACCEPTED means receipt only.\n",
            COMMAND_MAX_WAIT_SEC);
     output("Train commands simulate sensor/fault events; Train owns gate safety.\n"
+           "Local sim commands require the new Local simulation handler; legacy ACKs do not confirm them.\n"
+           "sim-stop stops generated traffic inputs; Local light control continues.\n"
+           "Use Local simulated time for traffic demos with Central --schedule disabled.\n"
            "Direct p#-fault is blocked: the current Train remote handler can deadlock.\n"
+           "Current Local validates coordination offsets but does not apply them yet.\n"
            "coordinate-at sets a Central dispatch time; v1 has no shared activation epoch.\n");
 }
 
@@ -249,7 +260,7 @@ static void display_ui(void) {
                view.peers[i].connected ? "CONNECTED" : "DISCONNECTED",
                central_peer_online(&view, source, now) ? "ONLINE" : "OFFLINE");
     }
-    output("\nID  Mode      Phase       NS      EW      Ped N/E Rail Remain Age    State\n");
+    output("\nID  Mode      Phase       NS      EW      Ped NS/EW  Railway Remain Age    State\n");
     for (i = 0; i < NUM_INTERSECTIONS; ++i) {
         const central_intersection_status_t *entry = &view.intersections[i];
         const status_msg_t *status = &entry->status;
@@ -259,10 +270,11 @@ static void display_ui(void) {
                     now - probes[routes[i]] >= HEARTBEAT_MISS_LIMIT * CENTRAL_NSEC ? "OFFLINE" :
                     !entry->synchronized ? "WAITING UPDATE" :
                     now < entry->received_at || now - entry->received_at >= central_monitor_status_max_age_ns(&view) ? "STALE" : "CURRENT";
-        output("I%u  %-9s %-11s %-7s %-7s %u/%u     %u    %3us  %5.1fs %s\n",
+        output("I%u  %-9s %-11s %-7s %-7s %s/%s  %-7s %3us  %5.1fs %s\n",
                i + 1, mode_name(status->mode), phase_name(status->phase),
                light_name(status->ns_state), light_name(status->ew_state),
-               status->pedestrian_ns, status->pedestrian_ew, status->railway_preempt,
+               status->pedestrian_ns ? "WALK" : "STOP", status->pedestrian_ew ? "WALK" : "STOP",
+               status->railway_preempt ? "ACTIVE" : "CLEAR",
                status->time_remaining, age_seconds(now, entry->received_at), freshness);
         if (central_monitor_health(&view, CONTROLLER_LOCAL, i) == 0)
             output("    Reported health DEGRADED; commands blocked until explicit recovery\n");
@@ -497,6 +509,9 @@ static int send_command(peer_context_t *peer, queued_command_t *work) {
         if (result == CENTRAL_SEND_OK) snprintf(detail, sizeof(detail), "%s",
             peer->index == 1 ? "Train receipt only; BUSY/application not reported" : "receipt confirmed; application not confirmed");
         else if (result == CENTRAL_SEND_REJECTED) snprintf(detail, sizeof(detail), "%s rejected request; v1 supplies no reason", controller_name(peer->source));
+        else if (result == CENTRAL_SEND_PROTOCOL && work->message.header.type == MSG_TEST &&
+                 work->message.header.dst == CONTROLLER_LOCAL)
+            snprintf(detail, sizeof(detail), "Local simulation reply invalid or ID not confirmed; not retried");
         else snprintf(detail, sizeof(detail), "%s (errno=%d); outcome unknown; not retried",
                       result == CENTRAL_SEND_PROTOCOL ? "invalid reply" :
                       saved_error == EBUSY ? "previous IPC still pending" :
@@ -928,8 +943,10 @@ static void execute_command(char *line) {
         }
     }
     else if (central_parse_command(line, &message, &target)) {
-        cancel_automatic(target);
+        if (message.header.type != MSG_TEST) cancel_automatic(target);
         command_result = enqueue_command(&message, target, 0, 0);
+        if (command_result == 0 && message.header.type == MSG_TEST && schedule_enabled)
+            output("Central schedule still uses wall time; use a run without --schedule for Local time-of-day demos.\n");
         if (command_result == 0 && message.header.type == MSG_MODE_COMMAND) {
             mode_cmd_msg_t command;
             memcpy(&command, message.data, sizeof(command));

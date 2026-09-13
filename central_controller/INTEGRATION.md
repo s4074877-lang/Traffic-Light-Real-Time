@@ -1,6 +1,6 @@
 # Central integration contract
 
-This revision changes Central-owned code and documents only. It adapts to the existing shared protocol, Local skeleton and merged Train simulator; it does not change those teammates' files or establish that their state machines are complete. See [IMPLEMENTATION_NOTE.md](IMPLEMENTATION_NOTE.md) for architecture and assignment coverage, and [VALIDATION.md](VALIDATION.md) for measured evidence.
+This revision updates Central for the merged Local state machine and Train simulator while retaining the shared protocol. Local/Train source remains with its owners. The Local observations below come from source review; they do not establish completed integrated QNX validation. See [IMPLEMENTATION_NOTE.md](IMPLEMENTATION_NOTE.md) for architecture and assignment coverage, and [VALIDATION.md](VALIDATION.md) for measured evidence.
 
 ## Ownership and assignment interpretation
 
@@ -14,19 +14,22 @@ Central-origin operator overrides are described by the assignment. The repositor
 
 | Route | Message | Current Central behavior and integration condition |
 | --- | --- | --- |
-| Local -> Central | `MSG_STATUS_UPDATE` | Retains actual mode, phase, vehicle/pedestrian states, railway preemption, reported time remaining and local receive age for I1-I6. Local must publish them. |
+| Local -> Central | `MSG_STATUS_UPDATE` | Retains reported mode, phase, vehicle/pedestrian states, railway preemption, remaining time and receive age. Current Local publishes I1 in a full envelope once per second while connected. |
 | Local/Train -> Central | `MSG_HEARTBEAT` | Records contact; typed payloads can additionally report per-target health. |
 | Local/Train -> Central | `MSG_FAULT_ALERT` | Retains source, type, severity, description and age. An explicit `FAULT_NONE` alert clears the retained alert. |
 | Train -> Central | `MSG_RAILWAY_STATUS` | Displays reported aggregate train state, gate state and fault for P1-P3. |
-| Central -> Local | `MSG_MODE_COMMAND` | Requests fixed/sensor, temporary mode, or cancellation of temporary mode. Local validates and safely applies it. |
-| Central -> Local | `MSG_COORDINATION_COMMAND` | Requests a fixed-mode phase and relative cycle offset; there is no shared activation epoch. |
+| Central -> Local | `MSG_MODE_COMMAND` | Local now validates fixed/sensor/temp/revert and echoes the ID. Temporary-baseline/revert differences remain below. |
+| Central -> Local | `MSG_COORDINATION_COMMAND` | Local validates and requests the phase, but currently ignores the validated relative cycle offset; there is no shared activation epoch. |
+| Central -> Local | `MSG_TEST` | Central sends versioned `SIM1` simulation requests with target and command ID; Local's current generic test handler does not implement them. |
 | Central -> Train | `MSG_TEST` | Carries an allowlisted simulator command in the existing string payload. Train implements this route despite the older shared-header comment that Central never sends to Train. |
 | Central -> Local/Train | `MSG_HEARTBEAT` | Compatibility contact probes, not proof of sensor or actuator health. |
 | Local -> Central | `MSG_OVERRIDE_REQUEST` | Declared in the shared header; application contract pending. |
 | Central -> Local | `MSG_DISPLAY_UPDATE` | Declared in the shared header; application contract pending. |
 | `central_ui` <-> Central core | Private local request/reply | Bounded commands and rendered status/history text, independent of the shared Local/Train ABI. |
 
-The current Local source primarily implements communication demonstrations. A successful heartbeat/test reply does not establish support for real status generation, mode application, coordination, pedestrians or railway preemption. The Local owner must supply and demonstrate those behaviors.
+The merged Local contains fixed/sensor phase sequencing, traffic and time-of-day simulation, pedestrian requests, railway pending/active/recovery states, status/fault publication and serialized sends to Central/Train. These are implemented paths, with review gaps listed below. Its `LOCAL_INTERSECTION_ID` is currently hardcoded to `I1` (wire ID 0), so test real-peer commands with `I1`; dashboard rows and endpoint routing do not create I2-I6 controllers.
+
+The team chat agrees that traffic simulation remains in Local and Central sends activation requests. It does not approve removing Yellow. Current vehicle sequencing is Red -> Green -> Yellow -> Red; Red already transitions directly to Green. WALK is the pedestrian permission state, displayed as WALK/STOP by Central; the NS/EW pedestrian geometry still needs agreement on the intersection diagram.
 
 ## Wire formats and Central compatibility adapter
 
@@ -51,7 +54,7 @@ Every external Local/Train application reply is a complete `reply_t`, with QNX r
 MsgReply(rcvid, 0, &reply, sizeof(reply));
 ```
 
-The second argument becomes the return value of `MsgSend`, not its reply byte count. Set `reply.status` to zero for acceptance or `-1` for rejection, supply a terminated timestamp, and echo the nonzero mode/coordination `command_id`. Other current messages use ID zero. Central tolerates an older rejection with ID zero; new Local handlers should echo the rejected ID too. With the existing shared receive callback wrapper, fill its supplied reply and return zero; the wrapper performs `MsgReply`.
+The second argument becomes the return value of `MsgSend`, not its reply byte count. Set `reply.status` to zero for acceptance or `-1` for rejection, supply a terminated timestamp, and echo the nonzero mode/coordination or `SIM1` `command_id`. Other current messages use ID zero. Central tolerates an older mode/coordination rejection with ID zero; new Local handlers should echo the rejected ID too. `SIM1` requires its own matching ID even for rejection. With the existing shared receive callback wrapper, fill its supplied reply and return zero; the wrapper performs `MsgReply`.
 
 `ACCEPTED` means a receipt/acceptance reply, not application of the requested state. Status v1 has no applied-command ID. Train is weaker: its current `MSG_TEST` handler discards the simulator's Boolean result and text, then returns success. Central therefore cannot distinguish successful simulation from BUSY or application rejection. `train-cmd status` reaches that handler, but its textual simulator result is not returned to Central. Inspect actual crossing telemetry and the Train console; an ACK is insufficient evidence of success.
 
@@ -72,7 +75,7 @@ Unmapped IDs retain the default route. The Local owner must publish the selected
 For a separate display, start the core on its QNX node:
 
 ```sh
-./central_controller -l --headless --schedule config/daily_schedule.example
+./central_controller -l --headless
 ```
 
 In another terminal on that node:
@@ -81,7 +84,9 @@ In another terminal on that node:
 ./central_ui
 ```
 
-The private default UI service is `traffic_central_controller_ui`. `central_ui -n name` selects another local UI service; `--no-color` disables color. `quit` closes the separate UI, while `shutdown` asks the core to stop. Closing the UI or its terminal leaves a headless core running. The embedded console remains available without `--headless`. Build/transfer both executables and the chosen configuration file using [README.md](README.md).
+For the Local simulation demonstration, omit `--schedule`: Local's 24-hour simulated clock chooses peak/offpeak/night behavior and automatic fixed/sensor mode. Central's optional schedule uses the QNX wall clock and would introduce another mode source. Manual mode requests still override Local time-of-day behavior.
+
+The private default UI service is `traffic_central_controller_ui`. `central_ui -n name` selects another local UI service; `--no-color` disables color. `quit` closes the separate UI, while `shutdown` asks the core to stop. Closing the UI or its terminal leaves a headless core running. The embedded console remains available without `--headless`. Build/transfer both executables using [README.md](README.md).
 
 ## Operator requests and schedules
 
@@ -104,6 +109,34 @@ Scheduling requests a new desired mode instead of replaying a command every tick
 
 `all` expands to individual messages with separate IDs and readiness checks, so receipt is neither atomic nor simultaneous. A request's five-second queue allowance starts when it becomes eligible for dispatch: `coordinate-at 10 ...` waits ten intentional seconds and then has five seconds to begin transmission. Late unsent intent expires.
 
+## Local traffic-simulation command contract
+
+The chat agrees the ownership boundary: simulation remains in Local, with activation requested by Central. The following wire format is the Central-side integration proposal implemented in this revision; it still needs the Local counterpart. It is not a claim that the chat already specified these bytes.
+
+| Central CLI | Requested Local behavior |
+| --- | --- |
+| `sim-start I1` | Enable Local traffic generation. |
+| `sim-stop I1` | Disable traffic generation while continuing lamp phases/timers, queued pedestrians and railway/fail-safe handling. Do not reset or stop the controller. |
+| `sim-time I1 07:00` | Set the Local simulated time to minute 420 of the day; preserve manual mode overrides and current safety state. |
+
+The target is mandatory: `I1` through `I6`, or `all`. Current real Local supports I1 only. `HH:MM` is exact 24-hour text from `00:00` to `23:59`. Central validates the command, uses its normal Local readiness/queue/expiry checks, and allocates an independent nonzero ID for each target. Simulation requests do not change Central's mode-policy holds.
+
+Use the existing full `test_message_t` envelope with `MSG_TEST`, source `CONTROLLER_CENTRAL` and destination `CONTROLLER_LOCAL`. Its 64-byte `data` array contains exactly one canonical ASCII string, followed by NUL and zero-filled remaining bytes:
+
+```text
+SIM1 <target> <command_id> START
+SIM1 <target> <command_id> STOP
+SIM1 <target> <command_id> TIME <minute>
+```
+
+`target` is the protocol intersection ID 0-5; `command_id` is 1-65535; `minute` is 0-1439. Use single spaces, uppercase verb and canonical decimal integers without signs or leading zeros (except `0`). For example, `sim-time I1 07:00` with assigned ID 42 sends `SIM1 0 42 TIME 420`. Central expands `all` into individual requests; there is no broadcast target inside this format.
+
+Local must validate the version, source/destination, exact syntax, allowed action, own target and value ranges before changing simulation state under its state mutex. Return the complete `reply_t` with `status=0` or `-1`, a terminated timestamp and the same command ID. Reject unsupported commands; do not execute arbitrary text. The legacy Local `MSG_TEST` handler only timestamps reception and ACKs ID zero. Central therefore records its reply to `SIM1` as `UNCONFIRMED`, never `ACCEPTED`, and does not replay automatically.
+
+Implement this IPC path independently of `ENABLE_DEMO_COMMANDS`; disabling the interactive demo console must not disable Central control. `ENABLE_TRAFFIC_SIMULATION` remains a build-time capability; the Local owner must add a runtime enabled state and explicit rejection when that capability is unavailable. On a capable build, repeated START/STOP should be idempotent. A valid ACK is acceptance, not a status report proving generation has started/stopped: v1 status has no simulation-enabled or simulation-time field. Confirm behavior on Local during integration before claiming the feature works end to end.
+
+## Train simulator requests
+
 Train simulation commands have a separate queue and strict allowlist:
 
 ```text
@@ -125,7 +158,7 @@ The parser recognizes the existing `p#-fault` syntax, but Central deliberately r
 
 ## Telemetry and timing agreement
 
-Local should publish a snapshot whenever a light changes, as required by the assignment. The proposed integration contract also repeats every owned intersection's current snapshot at least once per second. That repeat period is a design assumption to agree and measure, not a number supplied by the assignment. Heartbeats alone cannot show that phase or status generation is progressing.
+Local's status thread prepares and sends current I1 status on a one-second loop while Central is connected. The integration target also requires reporting light changes; measure receipt timing on QNX before claiming an end-to-end refresh bound. Heartbeats alone cannot show that phase or status generation is progressing. Current status carries no vehicle counts, sensor-detected flags, pending pedestrian requests, simulation running/time, train pending/active/recovery detail or applied-command ID. Central must not invent these from the phase or an ACK.
 
 Central uses one-second heartbeat releases, three consecutive missed probes for link-down, a 500 ms caller wait per peer operation, a five-second queue allowance and a default five-second status-age limit configurable with `-s 1..60`. Scheduling/network delay means these are settings, not measured worst-case bounds. Readiness is checked again before transmission. Missing data remains waiting/unknown, and old snapshots retain an age and stale/offline indication.
 
@@ -135,9 +168,22 @@ Current Train status does not publish independent up/down track occupancy, the t
 
 ## Remaining peer-owned work
 
+The following findings are from the merged Local source, not a QNX reproduction:
+
+| Local behavior | Required owner decision or fix |
+| --- | --- |
+| `mode-revert` with no temporary mode clears `manual_mode_override`. | Match the shared `CMD_REVERT` meaning: cancel only the temporary layer; preserve an existing persistent override. Returning to automatic time-of-day needs a separately agreed action. |
+| A second temporary mode saves the first temporary mode as its return state. | Preserve the original persistent/automatic baseline across replacement temporary requests, and test expiry/revert with Central offline. |
+| Coordination offset is checked but never stored or used. | Implement the offset or reject unsupported requests. An ACK is insufficient evidence of coordination. |
+| `ped_NS` WALK is served during EW Green; its request caps EW Green. | Define pedestrian NS/EW geometry first. The chat asks to cap the same-named vehicle Green to 10 seconds and transfer saved time to the opposite Green, bounded by `GREEN_MAX_SEC`; current cap direction does not match that wording. WALK also starts in every eligible phase even without a latched request, which needs an explicit behavior decision. |
+| Conflicting-green check runs after `update_lights_locked()` overwrites outputs; fail-safe HOLD can advance to Green on the next tick. | Check faults before normal output normalization and latch fail-safe all-red with pedestrian STOP until an explicit safe recovery condition. |
+| Real train preemption is ignored if a simulated train is already pending/active. | Upgrade the active event to wait for real `MSG_TRAIN_CLEAR`; connection-based suppression of future random trains does not fix an event already in progress. |
+
+Retain Yellow and the present WALK mapping until the team confirms the intersection geometry and phase specification; the chat's unanswered questions are not approval to remove an interlock.
+
 | Owner | Handoff or review |
 | --- | --- |
-| Local | Publish real status after changes and agreed refresh; safely handle mode/temp/revert/coordination; echo IDs; continue phases, railway protection and temporary expiry while Central is offline. |
+| Local | Implement the proposed `SIM1` traffic-simulation handler above; resolve the review gaps above, then demonstrate phases, railway protection, status refresh and temporary expiry with Central offline. |
 | Train | Return simulator results/BUSY instead of unconditional success. Add train STOP, track and flash reports only via an agreed protocol change if required. |
 | Train | Move blocking outbound `MsgSend` work away from simulator/state-machine callbacks using a bounded handoff. Current callbacks can wait on Central/Local. |
 | Train | Fix the remote `p#-fault` self-deadlock caused by re-locking the same state mutex in a callback. Synchronize simulator state shared by tick, console and remote-command paths; Central's separate queue cannot repair internal races. |
@@ -147,13 +193,7 @@ Current Train status does not publish independent up/down track occupancy, the t
 
 A future protocol should negotiate version/capabilities, identify sender sessions and per-target status sequences, and distinguish RECEIVED/QUEUED/APPLIED/REJECTED/BUSY with command IDs. True synchronized coordination also needs a common activation epoch/timebase, clock accuracy, late-arrival behavior and cancellation. Existing fields must not be silently repurposed to imply these guarantees.
 
-Suggested message to Thao:
-
-> T đã làm phía Central: hiển thị trạng thái thật, lệnh fixed/sensor/temp/revert, coordination, lịch giờ và UI riêng. M gửi t phần Local đang hỗ trợ, tên service/ID và format status nhé. Local cần gửi trạng thái mỗi khi đèn đổi, tự chuyển pha an toàn và tự hết hạn temp kể cả Central mất kết nối; ACK phải echo command_id. Phần Local gửi override hoặc Central gửi display xuống Local không bắt buộc riêng trong đề, nên nếu m đang làm thì chốt giúp t flow, ý nghĩa và timeout trước khi ghép. T giữ nguyên code của m.
-
-Suggested message to the Train owner:
-
-> Central đã nhận frame compact bên Train và đổi ID P1-P3 ở phía Central; có train-cmd để chuyển các lệnh simulator đã kiểm tra. T đang chặn gửi p#-fault từ Central vì remote handler khóa mutex rồi callback khóa lại chính mutex đó, dễ deadlock; tạm dùng console Train hoặc test stuck gate. Bên m giúp sửa chỗ này và trả đúng kết quả/BUSY thay vì luôn ACK thành công; chốt fault-clear và train STOP/track/flash nếu cần hiển thị. Cần kiểm tra callback IPC bị chặn, đồng bộ simulator và mapping một crossing tới hai intersection. T không sửa code Train, sẽ ghép/test theo contract mình thống nhất.
+Ready-to-send Vietnamese handoff messages are in [LOCAL_HANDOFF.md](LOCAL_HANDOFF.md).
 
 ## Real-time evidence required
 

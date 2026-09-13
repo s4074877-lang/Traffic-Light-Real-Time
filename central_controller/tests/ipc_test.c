@@ -86,6 +86,18 @@ static void legacy_server(const char *name, int ready_fd) {
             if (reply.command_id == 100) reply.command_id = 101;
         }
         if (frame.message.header.type == MSG_TEST) {
+            central_sim_command_t simulation;
+            if (central_simulation_decode(&frame.message, &simulation)) {
+                /* Distinguish today's Local generic ACK0 from a peer which
+                 * implements SIM1. Fixture IDs only; payload stays canonical. */
+                if (simulation.command_id == 201) reply.command_id = 0;
+                if (simulation.command_id == 203) reply.command_id = 204;
+                if (simulation.command_id >= 204 && simulation.command_id <= 206) {
+                    reply.status = -1;
+                    reply.command_id = simulation.command_id == 204 ? 0 :
+                        simulation.command_id == 205 ? 205 : 207;
+                }
+            }
             if (!strcmp(frame.message.data, "NACK")) reply.status = -1;
             if (!strcmp(frame.message.data, "BAD_STATUS")) reply.status = 1;
             if (!strcmp(frame.message.data, "BAD_TS"))
@@ -145,6 +157,92 @@ static int raw_send(int coid, const void *message, size_t size, reply_t *reply) 
     TimerTimeout(CLOCK_MONOTONIC, _NTO_TIMEOUT_SEND | _NTO_TIMEOUT_REPLY,
                  NULL, &timeout, NULL);
     return MsgSend(coid, message, size, reply, sizeof(*reply));
+}
+
+static void test_simulation_frames(void) {
+    test_message_t message, valid, normalized;
+    unsigned target;
+    require(central_parse_command("sim-time I6 23:59", &message, &target),
+            "simulation frame fixture parsed");
+    require(!central_frame_valid(&message, sizeof(message), CONTROLLER_LOCAL),
+            "internal simulation ID zero is not valid on the wire");
+    central_command_set_id(&message, UINT16_MAX);
+    require(central_frame_valid(&message, sizeof(message), CONTROLLER_LOCAL),
+            "canonical SIM1 with nonzero ID is valid on the wire");
+    require(central_frame_normalize(&message, sizeof(message), CONTROLLER_LOCAL, &normalized) &&
+            memcmp(&message, &normalized, sizeof(message)) == 0,
+            "simulation normalization preserves target, ID and minute");
+    valid = message;
+    const char *invalid[] = {
+        "SIM", "SIM2 5 1 TIME 1439", "SIM1 5 0 START", "SIM1 6 1 START", "SIM1 255 1 START",
+        "SIM1 5 65536 START", "SIM1 5 1 TIME 1440", "SIM1 5 1 UNKNOWN",
+        "SIM1 5 1 START extra", "SIM1 5 1 TIME 000", "SIM1 5 1 TIME 0 "
+    };
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+        memset(message.data, 0, sizeof(message.data));
+        strcpy(message.data, invalid[i]);
+        require(!central_frame_valid(&message, sizeof(message), CONTROLLER_LOCAL),
+                "malformed reserved simulation namespace is rejected");
+    }
+    message = valid;
+    message.data[strlen(message.data) + 1] = 'x';
+    require(!central_frame_valid(&message, sizeof(message), CONTROLLER_LOCAL),
+            "simulation frame cannot hide garbage after its terminator");
+    message = valid;
+    memset(message.data, 'x', sizeof(message.data));
+    memcpy(message.data, "SIM1", 4);
+    require(!central_frame_valid(&message, sizeof(message), CONTROLLER_LOCAL),
+            "unterminated simulation frame rejected");
+    message = valid;
+    memset(message.data, 0, sizeof(message.data));
+    strcpy(message.data, "STOP");
+    require(central_frame_valid(&message, sizeof(message), CONTROLLER_LOCAL) &&
+            central_command_id(&message) == 0,
+            "legacy Local demo messages remain compatible outside reserved SIM namespace");
+    message.header.dst = CONTROLLER_TRAIN;
+    strcpy(message.data, "SIM_LEGACY_TRAIN");
+    require(central_frame_valid(&message, sizeof(message), CONTROLLER_TRAIN) &&
+            central_command_id(&message) == 0,
+            "legacy Train test payloads are not reinterpreted as simulation commands");
+    message.header.src = CONTROLLER_LOCAL;
+    message.header.dst = CONTROLLER_CENTRAL;
+    require(central_frame_valid(&message, sizeof(message), CONTROLLER_CENTRAL),
+            "incoming legacy MSG_TEST retains its existing contract");
+}
+
+static void test_simulation_replies(central_link_t *link) {
+    test_message_t message;
+    reply_t reply;
+    unsigned target;
+    require(central_parse_command("sim-start I1", &message, &target),
+            "simulation ACK fixture parsed");
+    central_command_set_id(&message, 201);
+    central_timestamp(message.header.timestamp, sizeof(message.header.timestamp));
+    require(central_send(link, &message, &reply) == CENTRAL_SEND_PROTOCOL && errno == EPROTO,
+            "legacy Local success ACK0 cannot claim simulation command accepted");
+    central_command_set_id(&message, 202);
+    require(central_send(link, &message, &reply) == CENTRAL_SEND_OK && reply.command_id == 202,
+            "explicit SIM1 handler with matching ID can accept simulation command");
+    central_command_set_id(&message, 203);
+    require(central_send(link, &message, &reply) == CENTRAL_SEND_PROTOCOL && errno == EPROTO,
+            "simulation ACK with another command ID rejected");
+    central_command_set_id(&message, 204);
+    require(central_send(link, &message, &reply) == CENTRAL_SEND_PROTOCOL && errno == EPROTO,
+            "zero-ID simulation NACK does not identify this command");
+    central_command_set_id(&message, 205);
+    require(central_send(link, &message, &reply) == CENTRAL_SEND_REJECTED && reply.command_id == 205,
+            "matching-ID simulation NACK remains rejection");
+    central_command_set_id(&message, 206);
+    require(central_send(link, &message, &reply) == CENTRAL_SEND_PROTOCOL && errno == EPROTO,
+            "simulation NACK for unrelated command is a protocol error");
+    const char *commands[] = {"sim-stop I1", "sim-time I1 07:00"};
+    for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); ++i) {
+        require(central_parse_command(commands[i], &message, &target), commands[i]);
+        central_command_set_id(&message, 202);
+        require(central_send(link, &message, &reply) == CENTRAL_SEND_OK && reply.command_id == 202,
+                "stop and time commands also require matching-ID replies");
+    }
+    require(central_link_is_connected(link), "simulation protocol errors preserve transport");
 }
 
 static void test_compact_frames(void) {
@@ -419,6 +517,7 @@ int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     atexit(cleanup);
     test_compact_frames();
+    test_simulation_frames();
     snprintf(local_name, sizeof(local_name), "traffic_test_local_%ld", (long)getpid());
     snprintf(train_name, sizeof(train_name), "traffic_test_train_%ld", (long)getpid());
     snprintf(receiver_name, sizeof(receiver_name), "traffic_test_receiver_%ld", (long)getpid());
@@ -453,6 +552,7 @@ int main(void) {
     require(reply.command_id == 102, "reply payload remains ABI compatible");
 
     test_reply_prefixes(&local);
+    test_simulation_replies(&local);
 
     central_message_init(&message, MSG_TEST, CONTROLLER_CENTRAL, CONTROLLER_LOCAL);
     strcpy(message.data, "BAD_STATUS");

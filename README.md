@@ -47,10 +47,16 @@ QNX SDP environment, then copy `central_controller/build/x86_64-debug/central_co
 to the QNX target. Run `make -C central_controller/tests all PLATFORM=x86_64` to build
 its test executables.
 
-Central on `main` uses the existing shared protocol. Local and Train currently
-provide demonstration heartbeat/test traffic; real status publication and command
-application still need integration. A connected peer alone does not enable commands.
-The default maximum status age is five seconds, configurable with `-s 1..60`.
+Central uses the existing shared protocol. The merged Local now contains an I1
+state machine, traffic/time-of-day simulation, status/fault publication and
+mode/coordination handlers; Train publishes crossing state and accepts simulator
+requests. Central adds `sim-start I1`, `sim-stop I1` and `sim-time I1 07:00`, with
+the Local `SIM1` handler still required. For this demo, omit Central `--schedule`
+so Local's simulated clock controls time-of-day policy. A connected peer alone
+does not enable commands; the default maximum status age is five seconds,
+configurable with `-s 1..60`. Source review gaps and unverified real-peer behavior
+are recorded in the integration contract; historical fixture results are not
+validation of the updated Local.
 
 See [Central instructions](central_controller/README.md) and the
 [integration contract](central_controller/INTEGRATION.md) for test commands,

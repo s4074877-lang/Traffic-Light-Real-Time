@@ -107,6 +107,8 @@ static void peer_fixture(const char *name, int fd, unsigned peer) {
         if (write(fd, &value, sizeof(value)) != sizeof(value)) _exit(4);
         central_timestamp(reply.timestamp, sizeof(reply.timestamp));
         reply.command_id = central_command_id(&frame.message);
+        if (peer == 2 && value.type == MSG_TEST)
+            reply.command_id = 0; /* Current Local test handler acknowledges no simulation ID. */
         if (peer == 2 && value.type == MSG_MODE_COMMAND) {
             reply.status = -1;
             reply.command_id = 0; /* unchanged Local's legacy NACK convention */
@@ -201,7 +203,7 @@ static observation_t *find_event(unsigned peer, unsigned type, unsigned target,
     for (i = 0; i < observation_count[peer]; ++i) {
         observation_t *event = &observations[peer][i];
         if (event->type != type || event->received_at < after) continue;
-        if ((type == MSG_MODE_COMMAND || type == MSG_COORDINATION_COMMAND) &&
+        if (central_command_target(&event->message) != NUM_INTERSECTIONS &&
             event->target != target) continue;
         if (payload && strcmp(event->message.data, payload)) continue;
         return event;
@@ -240,6 +242,7 @@ static void send_local_status(int coid, unsigned id) {
     value.phase = PHASE_NS_GREEN;
     value.ns_state = LIGHT_GREEN;
     value.ew_state = LIGHT_RED;
+    value.pedestrian_ew = 1;
     value.time_remaining = 20;
     memcpy(frame.data, &value, sizeof(value));
     send_frame(coid, &frame, sizeof(frame));
@@ -376,6 +379,65 @@ static void check_schedule(int coid) {
             "schedule receipts also preserve the Local's last reported mode");
 }
 
+static void check_local_simulation(void) {
+    central_sim_command_t simulation;
+    observation_t *event;
+    uint64_t started = central_monotonic_ns();
+    command("sim-start I1");
+    event = wait_event(0, MSG_TEST, I1, NULL, started, 2000);
+    require(event && central_simulation_decode(&event->message, &simulation) &&
+            simulation.action == CENTRAL_SIM_START && simulation.target == I1 && simulation.command_id != 0,
+            "simulation start reaches Local with target and nonzero correlation ID");
+    require(find_event(1, MSG_TEST, I1, NULL, started) == NULL,
+            "traffic simulation command is not sent to Train");
+    char row[16];
+    snprintf(row, sizeof(row), "%u ", simulation.command_id);
+    uint64_t deadline = central_monotonic_ns() + 2 * CENTRAL_NSEC;
+    do {
+        command("commands");
+        if (line_contains(response, row, "ACCEPTED")) break;
+        pump(10);
+    } while (central_monotonic_ns() < deadline);
+    require(line_contains(response, row, "ACCEPTED") && line_contains(response, row, "sim-start"),
+            "matching simulation ACK is retained under its own Local command history");
+
+    started = central_monotonic_ns();
+    command("sim-time I1 07:00");
+    event = wait_event(0, MSG_TEST, I1, NULL, started, 2000);
+    require(event && central_simulation_decode(&event->message, &simulation) &&
+            simulation.action == CENTRAL_SIM_TIME && simulation.minute == 420,
+            "peak demo time is transmitted as minutes after midnight");
+
+    started = central_monotonic_ns();
+    command("sim-stop I2");
+    event = wait_event(2, MSG_TEST, I2, NULL, started, 2000);
+    require(event && central_simulation_decode(&event->message, &simulation) &&
+            simulation.action == CENTRAL_SIM_STOP && simulation.target == I2,
+            "simulation stop uses the configured intersection endpoint");
+    snprintf(row, sizeof(row), "%u ", simulation.command_id);
+    require(wait_response("commands", "Local simulation reply invalid or ID not confirmed", 2000),
+            "legacy Local success ACK with ID zero cannot confirm simulation support");
+    require(line_contains(response, row, "UNCONFIRMED"),
+            "legacy simulation receipt remains unconfirmed in the correct history row");
+    pump(1100);
+    require(find_event(2, MSG_TEST, I2, NULL, event->received_at + 1) == NULL,
+            "unconfirmed simulation command is not automatically replayed");
+
+    started = central_monotonic_ns();
+    require(!request("sim-start I4") && response_status < 0,
+            "simulation still requires current telemetry for its target");
+    require(!request("sim-time I1 24:00") && response_status < 0,
+            "invalid simulation time is rejected through the display interface");
+    pump(100);
+    require(find_event(0, MSG_TEST, I4, NULL, started) == NULL &&
+            find_event(0, MSG_TEST, I1, NULL, started) == NULL,
+            "invalid or unready simulation requests are not transmitted");
+    command("status");
+    require(line_contains(response, "I1 ", "STOP/WALK") && line_contains(response, "I1 ", "CLEAR") &&
+            line_contains(response, "I1 ", "FIXED"),
+            "readable pedestrian and railway state remain based on received telemetry after simulation ACK");
+}
+
 int main(int argc, char *argv[]) {
     char alternate_name[64], endpoint[80];
     test_message_t envelope;
@@ -440,6 +502,7 @@ int main(int argc, char *argv[]) {
             strstr(response, "GATE") != NULL && strstr(response, "CRITICAL") != NULL,
             "compact fault attaches P3 detail and descriptive fault/severity names");
     check_ui_lifecycle();
+    check_local_simulation();
 
     started = central_monotonic_ns();
     command("train-cmd train-up");

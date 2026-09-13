@@ -1,6 +1,55 @@
-# Central validation, 2026-09-12
+# Central validation
 
-## Current integration revision
+## Local-update review, 2026-09-13
+
+The merged Local source now includes I1 phases, traffic/time-of-day simulation,
+pedestrian/railway handling, status/fault envelopes and command-ID replies. This
+revision updates Central's simulation request path and documentation to match
+that ownership boundary. The proposed `SIM1` contract still needs its Local
+handler. Legacy generic `MSG_TEST` success with ID zero must not be reported as
+accepted simulation control.
+
+Current host checks used macOS Clang with
+`-std=c11 -Wall -Wextra -Werror -O2`:
+
+| Suite | Current result | Scope |
+| --- | --- | --- |
+| Command parser | 345 checks passed | Includes Local simulation syntax, ranges and canonical payload construction. |
+| Monitor | 218 checks passed | Host-compatible monitor behavior; no QNX IPC execution. |
+| Operator policy | 7,489 checks passed | Host-compatible policy checks; no live peer behavior. |
+
+The command parser also passed all 345 checks with UndefinedBehaviorSanitizer.
+An AddressSanitizer attempt aborted during macOS sanitizer initialization before
+tests ran, so no ASan pass is claimed. The updated core passed Clang syntax and
+warning checks with temporary QNX type declarations; this is not a QNX SDK build
+or an IPC runtime test.
+
+`make -C central_controller all PLATFORM=x86_64` failed immediately because
+`qcc` is not installed on this macOS host. No updated Central QNX binary was
+built or run in this revision. New `central_features_test` cases cover simulation
+routing/target/nonzero ID, matching acceptance versus legacy ID-zero
+`UNCONFIRMED` with no replay, unready/malformed request rejection and received
+WALK/STOP rendering; these QNX target cases have not run.
+
+The earlier QNX results below remain historical evidence for their recorded
+sources and binaries. Host checks and source review do not validate the updated
+Local state machine. Current pending checks are:
+
+- Build the updated core/UI and target tests with QNX SDP, then execute the
+  updated `central_features_test` simulation/display scenarios on QNX.
+- Run Central without `--schedule` against the real I1 Local and verify status,
+  mode-command IDs and display match Local.
+- Implement/test `SIM1` START/STOP/TIME on Local, including malformed/unsupported
+  requests, matching rejection IDs, idempotence, preserving manual overrides and
+  uninterrupted phases/pedestrian/railway handling when generation stops.
+- Resolve Local temporary replacement/revert baseline and coordination offset;
+  demonstrate mode expiry while Central is disconnected.
+- Agree pedestrian NS/EW geometry, Yellow and the 10-second cap; exercise
+  latched all-red fail-safe and real-train takeover of a simulated event.
+- Complete real Train/Local routing and intended-node integration. See
+  [INTEGRATION.md](INTEGRATION.md) for the observed peer-owned gaps.
+
+## Historical integration revision, 2026-09-12
 
 Base: `main` **7e5e933** (including the teammate's merged Train simulator).
 Build label: `central-20260912-integration`. All changes are under
@@ -52,7 +101,7 @@ versus operator priority 2, persistent holds, temporary expiry/revert, and expli
 schedule-resume. Dashboard values remain received states even when a new mode has
 been requested.
 
-### Current remaining limits
+### Remaining limits recorded on 2026-09-12
 
 - VM `.101:8000` responded with a QCONN banner. `.102` and `.103` each timed out
   after approximately two seconds. No GNS services were started/stopped and no
