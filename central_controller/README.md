@@ -1,9 +1,9 @@
 # Central controller
 
 Central monitors reports for I1–I6 and P1–P3, records faults, and sends high-level
-Local requests and Train simulator commands. Local owns lamp sequencing and safety
-interlocks; Train owns gates. Integration changes stay in this directory; shared
-protocol and teammate source files are unchanged.
+Local requests and Train simulator commands. Local owns lamp sequencing, traffic
+simulation and safety interlocks; Train owns gates. Shared protocol and teammate
+source files are unchanged.
 
 ## Build and open
 
@@ -71,6 +71,9 @@ is `/tmp/central_controller.log`; select a writable persistent path when needed.
 | `mode-revert I1` | Cancel temporary mode, preserving persistent operator intent |
 | `coordinate I1 NS 3` | Request NS/EW coordination with offset 0–43 seconds |
 | `coordinate-at 10 all NS 3` | Dispatch coordination after 1–3600 seconds |
+| `sim-start I1` | Request Local traffic generation; requires the Local `SIM1` handler |
+| `sim-stop I1` | Request stopping traffic generation while the controller continues |
+| `sim-time I1 07:00` | Request a Local simulated time, exact `HH:MM` in 24-hour format |
 | `train-cmd train-up` | Simulate W→E through P3→P2→P1 |
 | `train-cmd train-down` | Simulate E→W through P1→P2→P3 |
 | `train-cmd train P1 up` | Simulate one crossing/direction; `down` also supported |
@@ -106,6 +109,30 @@ requests pass; its five-second queue allowance starts at planned dispatch time.
 Other requests get five seconds from enqueue. Eligibility/age are rechecked before
 sending. V1 has no shared activation epoch, so `coordinate-at` does not guarantee
 simultaneous Local application.
+
+## Demonstration with the merged Local
+
+Start Central without `--schedule`, as shown above, so Local's simulated clock
+owns peak/offpeak/night mode selection. Current Local is hardcoded to I1; target
+`I1` when testing against that process. Other rows/routes are capacity, not running
+Local state machines. Local now publishes status each second and handles
+fixed/sensor/temp/revert/coordination requests with command IDs, but source review
+found unresolved temporary-baseline/revert, coordination-offset, pedestrian,
+fail-safe and real-train takeover behavior. See [INTEGRATION.md](INTEGRATION.md).
+
+Traffic simulation stays in Local. Central's new `sim-start`, `sim-stop` and
+`sim-time` commands send the versioned `SIM1` contract documented there. The
+current Local `MSG_TEST` handler does not implement that contract; its generic
+ID-zero ACK is `UNCONFIRMED`. The Local owner must add the handler before an
+integrated simulation-control demo. These commands require an explicit target.
+Central displays received pedestrian bits as WALK/STOP and railway preemption
+as ACTIVE/CLEAR. Vehicle counts, requested pedestrians and simulated time are not
+in status v1 and are not inferred for the dashboard.
+
+The chat does not confirm removal of Yellow. Current Red -> Green -> Yellow ->
+Red already changes directly from Red to Green. WALK represents pedestrian
+permission; agree the NS/EW geometry before changing its relationship to vehicle
+Green. [LOCAL_HANDOFF.md](LOCAL_HANDOFF.md) contains the team handoff messages.
 
 ## Optional daily policy and endpoint routing
 

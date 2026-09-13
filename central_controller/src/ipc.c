@@ -77,6 +77,12 @@ int central_frame_valid(const test_message_t *message, size_t size,
     unsigned source = message->header.src;
     switch (message->header.type) {
         case MSG_TEST:
+            if (source == CONTROLLER_CENTRAL && destination == CONTROLLER_LOCAL &&
+                memcmp(message->data, "SIM", 3) == 0) {
+                central_sim_command_t simulation;
+                return central_simulation_decode(message, &simulation) &&
+                    simulation.command_id != 0 && simulation.target < NUM_INTERSECTIONS;
+            }
             return memchr(message->data, '\0', sizeof(message->data)) != NULL;
         case MSG_HEARTBEAT: {
             heartbeat_msg_t value;
@@ -246,6 +252,10 @@ static int validate_reply(const test_message_t *request, const reply_t *reply,
         return CENTRAL_SEND_PROTOCOL;
     }
     if (reply->status == -1) {
+        central_sim_command_t simulation;
+        if (central_simulation_decode(request, &simulation)) {
+            return reply->command_id == id ? CENTRAL_SEND_REJECTED : CENTRAL_SEND_PROTOCOL;
+        }
         return reply->command_id == 0 || reply->command_id == id ?
             CENTRAL_SEND_REJECTED : CENTRAL_SEND_PROTOCOL;
     }

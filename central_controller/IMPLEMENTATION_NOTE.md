@@ -2,7 +2,7 @@
 
 ## Scope and assignment coverage
 
-Central is the control-room supervisor for the EEET2588 QNX traffic-light design project. It observes six logical intersections and three railway crossings, accepts operator requests, and distinguishes requested behavior from reported operation. This work is confined to `central_controller/`; shared protocol and Local/Train code remain under their teammates' ownership.
+Central is the control-room supervisor for the EEET2588 QNX traffic-light design project. It observes six logical intersections and three railway crossings, accepts operator requests, and distinguishes requested behavior from reported operation. Shared protocol and Local/Train code remain under their teammates' ownership.
 
 The supplied assignment requires safe continuous Local operation, railway protection, QNX IPC/synchronization, multiple QNX nodes and a separate display process. Its minimum functional network is I1-I2 plus railway protection; the full design extends that part to six intersections. Six Central dashboard rows do not establish six implemented Local state machines. Current Local/Train dependencies are documented in [INTEGRATION.md](INTEGRATION.md).
 
@@ -10,6 +10,7 @@ The supplied assignment requires safe continuous Local operation, railway protec
 | --- | --- | --- |
 | Control-room status and light settings | Per-intersection reports, gate/train state, faults, contact/health and data age. | Actual Local/Train telemetry required; missing fields stay unreported. |
 | Select operating patterns | Fixed/sensor, temporary/revert, optional daily schedule and operator precedence. | Local validates, applies safely and owns timers. |
+| Traffic simulation control | Versioned Local `SIM1` start/stop/time requests through existing `MSG_TEST`. | Local owns generation/time and must implement the proposed handler; its current generic ACK is not proof of support. |
 | Exceptional operator override | High-level mode/coordination through current shared messages. | No direct Central lamp writes or railway safety bypass. |
 | Railway gate problems | Reported gate/fault display and simulator-event forwarding to Train. | Train independently enforces/reports its red signal and gates. |
 | QNX IPC and synchronization | Named channels, message send/receive/reply, private display IPC, mutexes and condition variables. | Executed target evidence is in VALIDATION. |
@@ -28,7 +29,7 @@ Local-origin override requests and Central-to-Local display updates are extra sh
 | `src/ui_ipc.c/.h` | Private same-node request/reply between core and display. |
 | `src/ipc.c/.h` | Named-service transport, strict validation, compact normalization, reply checking and isolation of outstanding IPC. |
 | `src/monitor.c/.h` | Observed state, contact, typed health, freshness and command readiness. |
-| `src/commands.c/.h` | Local mode/coordination parser and command-ID/target helpers. |
+| `src/commands.c/.h` | Local mode/coordination/simulation parsing and command-ID/target helpers. |
 | `src/operator_policy.c/.h` | Train allowlist, bounded daily-file parser and pure scheduling/precedence helpers. |
 | `src/version.h` | Build label and compilation stamp. |
 | `config/daily_schedule.example` | Optional daily pattern example; actual times need justification for the team's intersection. |
@@ -135,6 +136,8 @@ Priority inheritance does not replace short critical sections, suitable prioriti
 
 Daily scheduling selects the latest applicable row per intersection, including previous-day wrap. Persistent operator intent holds automation. Temporary mode overlays it; `mode-revert` cancels only that layer. `schedule-resume` explicitly releases the hold. Uncertain operator outcomes conservatively suppress automation. Application priority fields are not QNX thread priorities or permission to override railway safety.
 
+For the merged Local simulation demo, start Central without `--schedule`. Local already advances a simulated 24-hour clock and selects fixed/sensor according to that clock unless manually overridden. Central's optional QNX wall-clock schedule is a separate mode source and is not used in that scenario. Simulation start/stop/time requests do not grant Central ownership of phase timers or safety transitions.
+
 `coordinate-at` provides Central release timing only. The payload lacks a shared epoch and lateness contract, and sequential transmission produces differing arrivals. True corridor synchronization needs an agreed future protocol, clock-error bounds and end-to-end measurements.
 
 ## Current interoperability limits
@@ -143,7 +146,7 @@ The adapter supports original envelopes and exact compact telemetry structures. 
 
 Train reports aggregate train state, gate state and fault; separate tracks, flashing phase and train STOP remain unreported. Its blocking callbacks, shared simulator concurrency, unconditional ACK and crossing-to-intersection routing need owner review before an integrated real-time claim. The current remote `p#-fault` path re-locks an already-held Train mutex through a callback, so Central blocks that request with an explicit unsent outcome. Console fault injection and a stuck-gate simulation provide alternatives while the Train owner fixes the deadlock. Central-only changes cannot repair the underlying peer code.
 
-Local must implement real phases, pedestrian/railway behavior, application receipts and status updates. Continued safe Local operation and temporary expiry with Central offline must be demonstrated using the actual Local process, not inferred from a Central fixture.
+The merged Local now implements phases, traffic/time-of-day simulation, pedestrian/railway paths, status/fault envelopes, mode/coordination receipts and send mutexes. It currently owns only I1. Source review found gaps in temporary replacement/revert semantics, ignored coordination offset, pedestrian mapping/cap, latched all-red fail-safe and real-train takeover of an existing simulation. The exact findings and proposed `SIM1` counterpart are in [INTEGRATION.md](INTEGRATION.md). Continued safe Local operation, temporary expiry with Central offline and simulation-control behavior must be demonstrated using the actual Local process, not inferred from a Central fixture.
 
 ## Validation and demonstration
 
