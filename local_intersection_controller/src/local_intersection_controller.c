@@ -17,6 +17,8 @@
 #define SECONDS_PER_DAY 86400
 #define TRAIN_PASSING_SECONDS 10
 #define MAX_SENSOR_CARS 12
+#define LOCAL_INTERSECTION_ID I1
+#define STATUS_PERIOD_SEC 1
 
 /*
  * Demo switches:
@@ -63,8 +65,24 @@ typedef struct {
     int next_train_direction;
     int train_direction;
     int train_pass_remaining;
+    int train_waiting_for_clear;
     int manual_mode_override;
     int manual_sensor_override;
+
+    int temp_mode_remaining;
+    traffic_light_mode temp_return_mode;
+    int temp_return_manual_override;
+    int coordination_pending;
+    phase_t coordination_phase;
+    int ped_extra_ns_green;
+    int ped_extra_ew_green;
+
+    uint8_t intersection_id;
+    int fault_active;
+    int fault_pending;
+    fault_type_t fault_type;
+    fault_severity_t fault_severity;
+    char fault_description[32];
 
     int train_pending;
     int train_active;
@@ -72,8 +90,11 @@ typedef struct {
 
     // Flags
     int ui_needs_update;
+    int status_dirty;
 
     pthread_mutex_t mutex;
+    pthread_mutex_t central_send_mutex;
+    pthread_mutex_t train_send_mutex;
 } local_state_t;
 
 static local_state_t state;
@@ -81,6 +102,8 @@ static name_attach_t *attach = NULL;
 
 static void start_train_locked(int direction);
 static void clear_train_locked(void);
+static void mark_status_dirty_locked(void);
+static void apply_time_settings_locked(void);
 
 static void print_usage(const char *prog) {
     printf("Usage: %s [-l | -g]\n", prog);
@@ -156,12 +179,12 @@ static int random_train_direction(void) {
 
 static int random_car_gap_seconds(void) {
     if (is_peak_time(state.sim_seconds)) {
-        return 3 + rand() % 4;   // 3-6 seconds at peak time
+        return 2 + rand() % 3;   // 2-4 seconds at peak time
     }
     if (is_night_time(state.sim_seconds)) {
-        return 20 + rand() % 16; // 20-35 seconds at night
+        return 14 + rand() % 12; // 14-25 seconds at night
     }
-    return 7 + rand() % 9;       // 7-15 seconds during normal hours
+    return 5 + rand() % 6;       // 5-10 seconds during normal hours
 }
 
 static traffic_light_mode display_mode(void) {
@@ -170,6 +193,92 @@ static traffic_light_mode display_mode(void) {
         return MODE_RAILWAY;
     }
     return state.traffic_mode;
+}
+
+static void mark_status_dirty_locked(void) {
+    state.status_dirty = 1;
+    state.ui_needs_update = 1;
+}
+
+static int target_matches_local(uint8_t target) {
+    return target == state.intersection_id || target == INTERSECTION_ALL;
+}
+
+static int railway_matches_local(uint8_t id) {
+    int crossing_id;
+    int first_intersection;
+
+    if (id == state.intersection_id) {
+        return 1;
+    }
+
+    if (id >= 1 && id <= NUM_CROSSINGS) {
+        crossing_id = id - 1;
+    } else if (id < NUM_CROSSINGS) {
+        crossing_id = id;
+    } else {
+        return 0;
+    }
+
+    first_intersection = crossing_id * 2;
+    return state.intersection_id == first_intersection ||
+           state.intersection_id == first_intersection + 1;
+}
+
+static void init_message(test_message_t *msg, msg_type_t type,
+                         controller_type_t src, controller_type_t dst) {
+    memset(msg, 0, sizeof(*msg));
+    msg->header.type = type;
+    msg->header.src = src;
+    msg->header.dst = dst;
+    get_timestamp(msg->header.timestamp, sizeof(msg->header.timestamp));
+}
+
+static void fill_status_locked(status_msg_t *status) {
+    memset(status, 0, sizeof(*status));
+    status->intersection_id = state.intersection_id;
+    status->mode = display_mode();
+    status->phase = state.phase;
+    status->ns_state = state.ns_light;
+    status->ew_state = state.ew_light;
+    status->pedestrian_ns = state.ped_ns_walk ? 1 : 0;
+    status->pedestrian_ew = state.ped_ew_walk ? 1 : 0;
+    status->railway_preempt =
+        (state.train_pending || state.train_active ||
+         state.train_recovery_remaining > 0) ? 1 : 0;
+    status->time_remaining = (uint16_t)(state.time_remaining > 0 ?
+        state.time_remaining : 0);
+}
+
+static void prepare_status_message_locked(test_message_t *msg) {
+    status_msg_t status;
+    init_message(msg, MSG_STATUS_UPDATE, CONTROLLER_LOCAL, CONTROLLER_CENTRAL);
+    fill_status_locked(&status);
+    memcpy(msg->data, &status, sizeof(status));
+    state.status_dirty = 0;
+}
+
+static void set_fault_locked(fault_type_t type, fault_severity_t severity,
+                             const char *description) {
+    state.fault_active = type != FAULT_NONE;
+    state.fault_pending = 1;
+    state.fault_type = type;
+    state.fault_severity = severity;
+    snprintf(state.fault_description, sizeof(state.fault_description),
+             "%s", description);
+    mark_status_dirty_locked();
+}
+
+static void prepare_fault_message_locked(test_message_t *msg) {
+    fault_msg_t fault;
+    init_message(msg, MSG_FAULT_ALERT, CONTROLLER_LOCAL, CONTROLLER_CENTRAL);
+    memset(&fault, 0, sizeof(fault));
+    fault.source_id = state.intersection_id;
+    fault.fault_type = state.fault_type;
+    fault.severity = state.fault_severity;
+    snprintf(fault.description, sizeof(fault.description),
+             "%s", state.fault_description);
+    memcpy(msg->data, &fault, sizeof(fault));
 }
 
 static int clamp_green_time(int seconds) {
@@ -202,9 +311,28 @@ static int green_time_for_direction(direction_t direction) {
     return clamp_green_time(seconds);
 }
 
+static int next_green_time_for_direction(direction_t direction) {
+    int seconds = green_time_for_direction(direction);
+
+    if (direction == DIR_NS) {
+        seconds += state.ped_extra_ns_green;
+        state.ped_extra_ns_green = 0;
+    } else {
+        seconds += state.ped_extra_ew_green;
+        state.ped_extra_ew_green = 0;
+    }
+
+    return clamp_green_time(seconds);
+}
+
 static int phase_matches_direction(phase_t phase, direction_t direction) {
     return (phase == PHASE_NS_GREEN && direction == DIR_NS) ||
            (phase == PHASE_EW_GREEN && direction == DIR_EW);
+}
+
+static int pedestrian_service_phase(phase_t phase, direction_t direction) {
+    return (phase == PHASE_EW_GREEN && direction == DIR_NS) ||
+           (phase == PHASE_NS_GREEN && direction == DIR_EW);
 }
 
 static void add_car_locked(direction_t direction) {
@@ -274,24 +402,34 @@ static void update_pedestrian_locked(void) {
         return;
     }
 
-    if (state.phase == PHASE_NS_GREEN && state.ped_ns_request) {
-        if (elapsed >= PED_WALK_START_SEC && state.time_remaining > PED_WALK_END_SEC) {
+    if (pedestrian_service_phase(state.phase, DIR_NS)) {
+        if (elapsed >= PED_WALK_START_SEC &&
+            state.time_remaining > PED_WALK_END_SEC) {
             state.ped_ns_walk = 1;
-        }
-        if (state.ped_ns_walk && state.time_remaining <= PED_WALK_END_SEC) {
-            state.ped_ns_walk = 0;
             state.ped_ns_request = 0;
+        } else if (state.ped_ns_walk &&
+                   state.time_remaining <= PED_WALK_END_SEC) {
+            state.ped_ns_walk = 0;
+        } else if (state.time_remaining <= PED_WALK_END_SEC) {
+            state.ped_ns_walk = 0;
         }
+    } else {
+        state.ped_ns_walk = 0;
     }
 
-    if (state.phase == PHASE_EW_GREEN && state.ped_ew_request) {
-        if (elapsed >= PED_WALK_START_SEC && state.time_remaining > PED_WALK_END_SEC) {
+    if (pedestrian_service_phase(state.phase, DIR_EW)) {
+        if (elapsed >= PED_WALK_START_SEC &&
+            state.time_remaining > PED_WALK_END_SEC) {
             state.ped_ew_walk = 1;
-        }
-        if (state.ped_ew_walk && state.time_remaining <= PED_WALK_END_SEC) {
-            state.ped_ew_walk = 0;
             state.ped_ew_request = 0;
+        } else if (state.ped_ew_walk &&
+                   state.time_remaining <= PED_WALK_END_SEC) {
+            state.ped_ew_walk = 0;
+        } else if (state.time_remaining <= PED_WALK_END_SEC) {
+            state.ped_ew_walk = 0;
         }
+    } else {
+        state.ped_ew_walk = 0;
     }
 }
 
@@ -302,22 +440,32 @@ static void set_phase_locked(phase_t phase, int duration) {
     state.ped_ns_walk = 0;
     state.ped_ew_walk = 0;
     update_lights_locked();
+    mark_status_dirty_locked();
 }
 
 static void advance_phase_locked(void) {
+    if (state.coordination_pending &&
+        (state.phase == PHASE_NS_YELLOW || state.phase == PHASE_EW_YELLOW)) {
+        set_phase_locked(state.coordination_phase,
+                         next_green_time_for_direction(state.coordination_phase == PHASE_NS_GREEN ?
+                                                       DIR_NS : DIR_EW));
+        state.coordination_pending = 0;
+        return;
+    }
+
     switch (state.phase) {
         case PHASE_NS_GREEN:
             set_phase_locked(PHASE_NS_YELLOW, YELLOW_SEC);
             break;
         case PHASE_NS_YELLOW:
-            set_phase_locked(PHASE_EW_GREEN, green_time_for_direction(DIR_EW));
+            set_phase_locked(PHASE_EW_GREEN, next_green_time_for_direction(DIR_EW));
             break;
         case PHASE_EW_GREEN:
             set_phase_locked(PHASE_EW_YELLOW, YELLOW_SEC);
             break;
         case PHASE_EW_YELLOW:
         default:
-            set_phase_locked(PHASE_NS_GREEN, green_time_for_direction(DIR_NS));
+            set_phase_locked(PHASE_NS_GREEN, next_green_time_for_direction(DIR_NS));
             break;
     }
 }
@@ -339,6 +487,17 @@ static void traffic_tick_locked(void) {
     }
 
     if (state.train_active) {
+        if (state.train_waiting_for_clear) {
+            if (state.train_pass_remaining > 0) {
+                state.train_pass_remaining--;
+            }
+            state.phase = PHASE_RAILWAY_HOLD;
+            state.time_remaining = state.train_pass_remaining;
+            update_lights_locked();
+            mark_status_dirty_locked();
+            return;
+        }
+
         if (state.train_pass_remaining > 0) {
             state.train_pass_remaining--;
         }
@@ -359,8 +518,10 @@ static void traffic_tick_locked(void) {
 
         if (state.train_recovery_remaining == 0) {
 #if ENABLE_TRAFFIC_SIMULATION
-            state.next_train_in_seconds = random_train_gap_seconds();
-            state.next_train_direction = random_train_direction();
+            if (!state.train_conn.connected) {
+                state.next_train_in_seconds = random_train_gap_seconds();
+                state.next_train_direction = random_train_direction();
+            }
 #endif
             set_phase_locked(PHASE_NS_GREEN, green_time_for_direction(DIR_NS));
         }
@@ -374,8 +535,35 @@ static void traffic_tick_locked(void) {
     update_lights_locked();
     update_pedestrian_locked();
 
+    if (state.ns_light == LIGHT_GREEN && state.ew_light == LIGHT_GREEN) {
+        state.traffic_mode = MODE_FAILSAFE;
+        state.phase = PHASE_RAILWAY_HOLD;
+        state.time_remaining = 0;
+        state.ns_light = LIGHT_RED;
+        state.ew_light = LIGHT_RED;
+        state.ped_ns_walk = 0;
+        state.ped_ew_walk = 0;
+        set_fault_locked(FAULT_NOT_WORKING, SEV_CRITICAL,
+                         "conflicting green");
+        return;
+    }
+
     if (state.time_remaining <= 0) {
         advance_phase_locked();
+    }
+}
+
+static void update_temporary_mode_locked(void) {
+    if (state.temp_mode_remaining <= 0) {
+        return;
+    }
+
+    state.temp_mode_remaining--;
+    if (state.temp_mode_remaining == 0) {
+        state.traffic_mode = state.temp_return_mode;
+        state.manual_mode_override = state.temp_return_manual_override;
+        apply_time_settings_locked();
+        mark_status_dirty_locked();
     }
 }
 
@@ -383,6 +571,7 @@ static void apply_time_settings_locked(void) {
     if (!state.manual_mode_override) {
         state.traffic_mode = is_peak_time(state.sim_seconds) ?
             MODE_FIXED : MODE_SENSOR;
+        mark_status_dirty_locked();
     }
 }
 
@@ -424,6 +613,7 @@ static void update_time_of_day_locked(void) {
 
     if (!state.train_pending && !state.train_active &&
         state.train_recovery_remaining <= 0 &&
+        !state.train_conn.connected &&
         state.next_train_in_seconds > 0) {
         state.next_train_in_seconds--;
     }
@@ -431,6 +621,7 @@ static void update_time_of_day_locked(void) {
     if (state.next_train_in_seconds <= 0 &&
         !state.train_pending &&
         !state.train_active &&
+        !state.train_conn.connected &&
         state.train_recovery_remaining <= 0) {
         start_train_locked(state.next_train_direction);
         state.next_train_in_seconds = 0;
@@ -451,17 +642,42 @@ static void set_sim_hour_locked(int hour) {
 #endif
 }
 
-static void add_pedestrian_request_locked(direction_t direction) {
+static void cap_green_for_pedestrian_locked(direction_t direction) {
+    int elapsed;
+    int removed;
+
+    if (!pedestrian_service_phase(state.phase, direction) ||
+        state.time_remaining <= PED_GREEN_CAP_SEC) {
+        return;
+    }
+
+    elapsed = state.phase_duration - state.time_remaining;
+    removed = state.time_remaining - PED_GREEN_CAP_SEC;
+    state.time_remaining = PED_GREEN_CAP_SEC;
+    state.phase_duration = elapsed + PED_GREEN_CAP_SEC;
+
     if (direction == DIR_NS) {
+        state.ped_extra_ns_green += removed;
+    } else {
+        state.ped_extra_ew_green += removed;
+    }
+}
+
+static void add_pedestrian_request_locked(direction_t direction) {
+    int already_requested;
+
+    if (direction == DIR_NS) {
+        already_requested = state.ped_ns_request;
         state.ped_ns_request = 1;
     } else {
+        already_requested = state.ped_ew_request;
         state.ped_ew_request = 1;
     }
 
-    if (phase_matches_direction(state.phase, direction) &&
-        state.time_remaining > PED_GREEN_CAP_SEC) {
-        state.time_remaining = PED_GREEN_CAP_SEC;
+    if (!already_requested) {
+        cap_green_for_pedestrian_locked(direction);
     }
+    mark_status_dirty_locked();
 }
 
 static void toggle_sensor_locked(direction_t direction) {
@@ -474,18 +690,24 @@ static void toggle_sensor_locked(direction_t direction) {
         state.sensor_ew_count =
             state.sensor_ew_count >= SENSOR_CAR_THRESHOLD ? 0 : DEMO_HIGH_CAR_COUNT;
     }
+    mark_status_dirty_locked();
 }
 
-static void start_train_locked(int direction) {
+static void start_train_common_locked(int direction, int wait_for_clear,
+                                      int eta_seconds) {
     if (state.train_active || state.train_pending) {
         return;
     }
 
     state.train_pending = 1;
     state.train_direction = direction;
-    state.train_pass_remaining = TRAIN_PASSING_SECONDS;
+    state.train_pass_remaining = wait_for_clear ?
+        eta_seconds : TRAIN_PASSING_SECONDS;
+    state.train_waiting_for_clear = wait_for_clear;
     state.train_recovery_remaining = 0;
     state.next_train_in_seconds = 0;
+    state.ped_extra_ns_green = 0;
+    state.ped_extra_ew_green = 0;
 
     if (state.phase == PHASE_NS_GREEN) {
         set_phase_locked(PHASE_NS_YELLOW, YELLOW_SEC);
@@ -496,6 +718,19 @@ static void start_train_locked(int direction) {
         state.train_active = 1;
         set_phase_locked(PHASE_RAILWAY_HOLD, 0);
     }
+
+    mark_status_dirty_locked();
+}
+
+static void start_train_locked(int direction) {
+    start_train_common_locked(direction, 0, 0);
+}
+
+static void start_train_message_locked(int direction, int eta_seconds) {
+    if (eta_seconds < 0) {
+        eta_seconds = 0;
+    }
+    start_train_common_locked(direction, 1, eta_seconds);
 }
 
 static void clear_train_locked(void) {
@@ -504,8 +739,12 @@ static void clear_train_locked(void) {
         state.train_active = 0;
         state.train_direction = 0;
         state.train_pass_remaining = 0;
+        state.train_waiting_for_clear = 0;
         state.train_recovery_remaining = RAILWAY_RECOVERY_SEC;
+        state.ped_extra_ns_green = 0;
+        state.ped_extra_ew_green = 0;
         set_phase_locked(PHASE_RAILWAY_HOLD, RAILWAY_RECOVERY_SEC);
+        mark_status_dirty_locked();
     }
 }
 
@@ -522,7 +761,12 @@ static void reset_demo_inputs_locked(void) {
     state.train_active = 0;
     state.train_direction = 0;
     state.train_pass_remaining = 0;
+    state.train_waiting_for_clear = 0;
     state.train_recovery_remaining = 0;
+    state.temp_mode_remaining = 0;
+    state.coordination_pending = 0;
+    state.ped_extra_ns_green = 0;
+    state.ped_extra_ew_green = 0;
 #if ENABLE_TRAFFIC_SIMULATION
     state.next_train_in_seconds = random_train_gap_seconds();
     state.next_train_direction = random_train_direction();
@@ -533,6 +777,7 @@ static void reset_demo_inputs_locked(void) {
     state.traffic_mode = MODE_FIXED;
 #endif
     set_phase_locked(PHASE_NS_GREEN, green_time_for_direction(DIR_NS));
+    mark_status_dirty_locked();
 }
 
 // Display UI
@@ -602,8 +847,17 @@ static void display_ui(void) {
                state.train_direction, state.time_remaining);
         printf("Next train: countdown starts after current train clears\n");
     } else if (state.train_active) {
-        printf("Train: line %d at crossing, clear in [%d] sec\n",
-               state.train_direction, state.train_pass_remaining);
+        if (state.train_waiting_for_clear) {
+            printf("Train: line %d active, waiting for TRAIN_CLEAR",
+                   state.train_direction);
+            if (state.train_pass_remaining > 0) {
+                printf(" eta [%d] sec", state.train_pass_remaining);
+            }
+            printf("\n");
+        } else {
+            printf("Train: line %d at crossing, clear in [%d] sec\n",
+                   state.train_direction, state.train_pass_remaining);
+        }
         printf("Next train: countdown starts after current train clears\n");
     } else if (state.train_recovery_remaining > 0) {
         printf("Train: clear, recovery remaining [%d] sec\n",
@@ -611,8 +865,12 @@ static void display_ui(void) {
         printf("Next train: countdown starts after recovery\n");
     } else {
         printf("Train: none active\n");
-        printf("Next train: line %d in [%d] sec\n",
-               state.next_train_direction, state.next_train_in_seconds);
+        if (state.train_conn.connected) {
+            printf("Railway source: train_controller messages\n");
+        } else {
+            printf("Next train: line %d in [%d] sec\n",
+                   state.next_train_direction, state.next_train_in_seconds);
+        }
     }
 #endif
 
@@ -661,9 +919,194 @@ static int handle_test_message(int rcvid, test_message_t *msg, reply_t *reply, v
     return 0;
 }
 
+static int handle_mode_command(int rcvid, test_message_t *msg, reply_t *reply, void *ctx) {
+    (void)rcvid;
+    local_state_t *s = (local_state_t *)ctx;
+    mode_cmd_msg_t command;
+    int accepted = 0;
+
+    memcpy(&command, msg->data, sizeof(command));
+    reply->command_id = command.command_id;
+
+    pthread_mutex_lock(&s->mutex);
+    strncpy(s->last_recv_central, msg->header.timestamp, sizeof(s->last_recv_central) - 1);
+    get_timestamp(s->last_central_update, sizeof(s->last_central_update));
+
+    if (msg->header.src == CONTROLLER_CENTRAL &&
+        target_matches_local(command.intersection_id) &&
+        command.command_id != 0 &&
+        command.new_mode <= MODE_SENSOR &&
+        command.priority >= CMD_PRIO_SCHEDULE &&
+        command.priority <= CMD_PRIO_OPERATOR &&
+        command.action <= CMD_REVERT) {
+        if (command.action == CMD_SET_MODE && command.duration_sec == 0) {
+            s->traffic_mode = command.new_mode;
+            s->manual_mode_override = 1;
+            s->temp_mode_remaining = 0;
+            accepted = 1;
+        } else if (command.action == CMD_TEMPORARY && command.duration_sec > 0) {
+            s->temp_return_mode = s->traffic_mode;
+            s->temp_return_manual_override = s->manual_mode_override;
+            s->traffic_mode = command.new_mode;
+            s->manual_mode_override = 1;
+            s->temp_mode_remaining = command.duration_sec;
+            accepted = 1;
+        } else if (command.action == CMD_REVERT && command.duration_sec == 0) {
+            if (s->temp_mode_remaining > 0) {
+                s->traffic_mode = s->temp_return_mode;
+                s->manual_mode_override = s->temp_return_manual_override;
+                s->temp_mode_remaining = 0;
+            } else {
+                s->manual_mode_override = 0;
+                apply_time_settings_locked();
+            }
+            accepted = 1;
+        }
+
+        if (accepted) {
+            mark_status_dirty_locked();
+        }
+    }
+
+    s->ui_needs_update = 1;
+    pthread_mutex_unlock(&s->mutex);
+
+    reply->status = accepted ? 0 : -1;
+    get_timestamp(reply->timestamp, sizeof(reply->timestamp));
+    return 0;
+}
+
+static int handle_coordination_command(int rcvid, test_message_t *msg,
+                                       reply_t *reply, void *ctx) {
+    (void)rcvid;
+    local_state_t *s = (local_state_t *)ctx;
+    coordination_command_msg_t command;
+    int accepted = 0;
+
+    memcpy(&command, msg->data, sizeof(command));
+    reply->command_id = command.command_id;
+
+    pthread_mutex_lock(&s->mutex);
+    strncpy(s->last_recv_central, msg->header.timestamp, sizeof(s->last_recv_central) - 1);
+    get_timestamp(s->last_central_update, sizeof(s->last_central_update));
+
+    if (msg->header.src == CONTROLLER_CENTRAL &&
+        target_matches_local(command.intersection_id) &&
+        command.command_id != 0 &&
+        command.mode == MODE_FIXED &&
+        command.reserved == 0 &&
+        command.cycle_offset_sec < 2 * (GREEN_BASE_SEC + YELLOW_SEC) &&
+        (command.phase == PHASE_NS_GREEN || command.phase == PHASE_EW_GREEN)) {
+        s->traffic_mode = MODE_FIXED;
+        s->manual_mode_override = 1;
+        s->coordination_phase = command.phase;
+        s->coordination_pending =
+            !(s->phase == command.phase && s->time_remaining > 0);
+        accepted = 1;
+        mark_status_dirty_locked();
+    }
+
+    s->ui_needs_update = 1;
+    pthread_mutex_unlock(&s->mutex);
+
+    reply->status = accepted ? 0 : -1;
+    get_timestamp(reply->timestamp, sizeof(reply->timestamp));
+    return 0;
+}
+
+static int handle_sensor_update(int rcvid, test_message_t *msg,
+                                reply_t *reply, void *ctx) {
+    (void)rcvid;
+    local_state_t *s = (local_state_t *)ctx;
+    sensor_msg_t sensor;
+    int accepted = 0;
+
+    memcpy(&sensor, msg->data, sizeof(sensor));
+
+    pthread_mutex_lock(&s->mutex);
+    if (target_matches_local(sensor.intersection_id) &&
+        sensor.direction <= DIR_EW) {
+        s->manual_sensor_override = 1;
+        if (sensor.direction == DIR_NS) {
+            s->sensor_ns_count = sensor.car_count;
+        } else {
+            s->sensor_ew_count = sensor.car_count;
+        }
+        accepted = 1;
+        mark_status_dirty_locked();
+    }
+    s->ui_needs_update = 1;
+    pthread_mutex_unlock(&s->mutex);
+
+    reply->status = accepted ? 0 : -1;
+    get_timestamp(reply->timestamp, sizeof(reply->timestamp));
+    return 0;
+}
+
+static int handle_ped_request(int rcvid, test_message_t *msg,
+                              reply_t *reply, void *ctx) {
+    (void)rcvid;
+    local_state_t *s = (local_state_t *)ctx;
+    ped_msg_t ped;
+    int accepted = 0;
+
+    memcpy(&ped, msg->data, sizeof(ped));
+
+    pthread_mutex_lock(&s->mutex);
+    if (target_matches_local(ped.intersection_id) &&
+        ped.direction <= DIR_EW && ped.pressed) {
+        add_pedestrian_request_locked((direction_t)ped.direction);
+        accepted = 1;
+    }
+    s->ui_needs_update = 1;
+    pthread_mutex_unlock(&s->mutex);
+
+    reply->status = accepted ? 0 : -1;
+    get_timestamp(reply->timestamp, sizeof(reply->timestamp));
+    return 0;
+}
+
+static int handle_railway_message(int rcvid, test_message_t *msg,
+                                  reply_t *reply, void *ctx) {
+    (void)rcvid;
+    local_state_t *s = (local_state_t *)ctx;
+    railway_msg_t railway;
+    int accepted = 0;
+
+    memcpy(&railway, msg->data, sizeof(railway));
+
+    pthread_mutex_lock(&s->mutex);
+    if (msg->header.src == CONTROLLER_TRAIN &&
+        railway_matches_local(railway.intersection_id)) {
+        strncpy(s->last_recv_train, msg->header.timestamp, sizeof(s->last_recv_train) - 1);
+        get_timestamp(s->last_train_update, sizeof(s->last_train_update));
+
+        if (msg->header.type == MSG_RAILWAY_PREEMPT && railway.active) {
+            start_train_message_locked(railway.intersection_id,
+                                       railway.eta_seconds);
+            accepted = 1;
+        } else if (msg->header.type == MSG_TRAIN_CLEAR) {
+            clear_train_locked();
+            accepted = 1;
+        }
+    }
+    s->ui_needs_update = 1;
+    pthread_mutex_unlock(&s->mutex);
+
+    reply->status = accepted ? 0 : -1;
+    get_timestamp(reply->timestamp, sizeof(reply->timestamp));
+    return 0;
+}
+
 // Message handlers array
 static message_handler_entry_t handlers[] = {
-    { MSG_TEST, 0, handle_test_message }  // 0 = accept from any controller
+    { MSG_TEST, 0, handle_test_message },
+    { MSG_MODE_COMMAND, CONTROLLER_CENTRAL, handle_mode_command },
+    { MSG_COORDINATION_COMMAND, CONTROLLER_CENTRAL, handle_coordination_command },
+    { MSG_SENSOR_UPDATE, 0, handle_sensor_update },
+    { MSG_PED_REQUEST, 0, handle_ped_request },
+    { MSG_RAILWAY_PREEMPT, CONTROLLER_TRAIN, handle_railway_message },
+    { MSG_TRAIN_CLEAR, CONTROLLER_TRAIN, handle_railway_message }
 };
 
 // Thread to handle incoming messages
@@ -682,7 +1125,7 @@ static void* connection_thread(void *arg) {
         if (connection_try_connect(&state.central_conn)) {
             pthread_mutex_lock(&state.mutex);
             get_timestamp(state.last_central_update, sizeof(state.last_central_update));
-            state.ui_needs_update = 1;
+            mark_status_dirty_locked();
             pthread_mutex_unlock(&state.mutex);
         }
 
@@ -694,7 +1137,9 @@ static void* connection_thread(void *arg) {
             pthread_mutex_unlock(&state.mutex);
 
             // Send initial message to notify train we're connected
+            pthread_mutex_lock(&state.train_send_mutex);
             send_test_message(&state.train_conn, CONTROLLER_LOCAL, CONTROLLER_TRAIN);
+            pthread_mutex_unlock(&state.train_send_mutex);
         }
 
         sleep(2);
@@ -733,12 +1178,65 @@ static void* traffic_thread(void *arg) {
 #if ENABLE_TRAFFIC_SIMULATION
         update_time_of_day_locked();
 #endif
+        update_temporary_mode_locked();
         traffic_tick_locked();
 #if ENABLE_TRAFFIC_SIMULATION
         update_vehicle_counts_locked();
 #endif
-        state.ui_needs_update = 1;
+        mark_status_dirty_locked();
         pthread_mutex_unlock(&state.mutex);
+    }
+
+    return NULL;
+}
+
+// Thread to publish Local status/faults to Central
+static void* status_thread(void *arg) {
+    (void)arg;
+
+    while (1) {
+        test_message_t status_msg;
+        test_message_t fault_msg;
+        reply_t reply;
+        int send_status = 0;
+        int send_fault = 0;
+
+        sleep(STATUS_PERIOD_SEC);
+
+        pthread_mutex_lock(&state.mutex);
+        if (state.central_conn.connected) {
+            prepare_status_message_locked(&status_msg);
+            send_status = 1;
+
+            if (state.fault_pending) {
+                prepare_fault_message_locked(&fault_msg);
+                send_fault = 1;
+            }
+        }
+        pthread_mutex_unlock(&state.mutex);
+
+        if (send_fault || send_status) {
+            pthread_mutex_lock(&state.central_send_mutex);
+
+            if (send_fault && send_message(&state.central_conn, &fault_msg, &reply) == 0 &&
+                reply.status == 0) {
+                pthread_mutex_lock(&state.mutex);
+                state.fault_pending = 0;
+                get_timestamp(state.last_send_central, sizeof(state.last_send_central));
+                state.ui_needs_update = 1;
+                pthread_mutex_unlock(&state.mutex);
+            }
+
+            if (send_status && send_message(&state.central_conn, &status_msg, &reply) == 0 &&
+                reply.status == 0) {
+                pthread_mutex_lock(&state.mutex);
+                get_timestamp(state.last_send_central, sizeof(state.last_send_central));
+                state.ui_needs_update = 1;
+                pthread_mutex_unlock(&state.mutex);
+            }
+
+            pthread_mutex_unlock(&state.central_send_mutex);
+        }
     }
 
     return NULL;
@@ -753,7 +1251,13 @@ static void* heartbeat_thread(void *arg) {
 
         // Check central connection
         if (connection_is_connected(&state.central_conn)) {
-            if (send_heartbeat(&state.central_conn, CONTROLLER_LOCAL, CONTROLLER_CENTRAL) != 0) {
+            int heartbeat_failed;
+            pthread_mutex_lock(&state.central_send_mutex);
+            heartbeat_failed =
+                send_heartbeat(&state.central_conn, CONTROLLER_LOCAL, CONTROLLER_CENTRAL);
+            pthread_mutex_unlock(&state.central_send_mutex);
+
+            if (heartbeat_failed != 0) {
                 pthread_mutex_lock(&state.mutex);
                 get_timestamp(state.last_central_update, sizeof(state.last_central_update));
                 state.ui_needs_update = 1;
@@ -763,7 +1267,13 @@ static void* heartbeat_thread(void *arg) {
 
         // Check train connection
         if (connection_is_connected(&state.train_conn)) {
-            if (send_heartbeat(&state.train_conn, CONTROLLER_LOCAL, CONTROLLER_TRAIN) != 0) {
+            int heartbeat_failed;
+            pthread_mutex_lock(&state.train_send_mutex);
+            heartbeat_failed =
+                send_heartbeat(&state.train_conn, CONTROLLER_LOCAL, CONTROLLER_TRAIN);
+            pthread_mutex_unlock(&state.train_send_mutex);
+
+            if (heartbeat_failed != 0) {
                 pthread_mutex_lock(&state.mutex);
                 get_timestamp(state.last_train_update, sizeof(state.last_train_update));
                 state.ui_needs_update = 1;
@@ -853,7 +1363,11 @@ static int execute_command(const char *cmd) {
             return -1;
         }
 
-        if (send_test_message(&state.central_conn, CONTROLLER_LOCAL, CONTROLLER_CENTRAL) == 0) {
+        pthread_mutex_lock(&state.central_send_mutex);
+        int sent = send_test_message(&state.central_conn, CONTROLLER_LOCAL, CONTROLLER_CENTRAL);
+        pthread_mutex_unlock(&state.central_send_mutex);
+
+        if (sent == 0) {
             pthread_mutex_lock(&state.mutex);
             get_timestamp(state.last_send_central, sizeof(state.last_send_central));
             state.ui_needs_update = 1;
@@ -872,7 +1386,11 @@ static int execute_command(const char *cmd) {
             return -1;
         }
 
-        if (send_test_message(&state.train_conn, CONTROLLER_LOCAL, CONTROLLER_TRAIN) == 0) {
+        pthread_mutex_lock(&state.train_send_mutex);
+        int sent = send_test_message(&state.train_conn, CONTROLLER_LOCAL, CONTROLLER_TRAIN);
+        pthread_mutex_unlock(&state.train_send_mutex);
+
+        if (sent == 0) {
             pthread_mutex_lock(&state.mutex);
             get_timestamp(state.last_send_train, sizeof(state.last_send_train));
             state.ui_needs_update = 1;
@@ -918,8 +1436,12 @@ int main(int argc, char *argv[]) {
 #endif
     memset(&state, 0, sizeof(state));
     pthread_mutex_init(&state.mutex, NULL);
+    pthread_mutex_init(&state.central_send_mutex, NULL);
+    pthread_mutex_init(&state.train_send_mutex, NULL);
     state.mode = mode;
     state.ui_needs_update = 1;
+    state.status_dirty = 1;
+    state.intersection_id = LOCAL_INTERSECTION_ID;
 #if ENABLE_TRAFFIC_SIMULATION
     state.sim_seconds = 6 * 3600;
     state.next_train_in_seconds = random_train_gap_seconds();
@@ -951,7 +1473,8 @@ int main(int argc, char *argv[]) {
                  sizeof(handlers) / sizeof(handlers[0]), &state);
 
     // Start threads
-    pthread_t msg_thread, conn_thread, ui_thread, hb_thread, traffic_thread_id;
+    pthread_t msg_thread, conn_thread, ui_thread, hb_thread;
+    pthread_t traffic_thread_id, status_thread_id;
 
     if (pthread_create(&msg_thread, NULL, message_handler_thread, &recv_ctx) != 0) {
         fprintf(stderr, "Failed to create message handler thread\n");
@@ -975,6 +1498,11 @@ int main(int argc, char *argv[]) {
 
     if (pthread_create(&traffic_thread_id, NULL, traffic_thread, NULL) != 0) {
         fprintf(stderr, "Failed to create traffic thread\n");
+        return EXIT_FAILURE;
+    }
+
+    if (pthread_create(&status_thread_id, NULL, status_thread, NULL) != 0) {
+        fprintf(stderr, "Failed to create status thread\n");
         return EXIT_FAILURE;
     }
 
@@ -1008,5 +1536,7 @@ int main(int argc, char *argv[]) {
     connection_close(&state.train_conn);
     connection_unregister_service(attach);
     pthread_mutex_destroy(&state.mutex);
+    pthread_mutex_destroy(&state.central_send_mutex);
+    pthread_mutex_destroy(&state.train_send_mutex);
     return EXIT_SUCCESS;
 }
