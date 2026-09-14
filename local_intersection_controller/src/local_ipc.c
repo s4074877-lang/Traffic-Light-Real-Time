@@ -1,6 +1,114 @@
 #include "local_controller.h"
 
+#include <ctype.h>
 #include <string.h>
+
+static int parse_sim_number(const char *text, unsigned maximum, unsigned *value) {
+    unsigned parsed = 0;
+
+    if (!text || !*text || (text[0] == '0' && text[1] != '\0')) return 0;
+    for (const unsigned char *cursor = (const unsigned char *)text; *cursor; ++cursor) {
+        unsigned digit;
+        if (!isdigit(*cursor)) return 0;
+        digit = (unsigned)(*cursor - '0');
+        if (parsed > maximum / 10U ||
+            (parsed == maximum / 10U && digit > maximum % 10U)) return 0;
+        parsed = parsed * 10U + digit;
+    }
+    *value = parsed;
+    return 1;
+}
+
+static int parse_sim_command(const char *text, unsigned *target,
+                             unsigned *command_id, unsigned *minute,
+                             int *action) {
+    char copy[sizeof(((test_message_t *)0)->data)];
+    char *tokens[5] = {0};
+    const char *terminator;
+    size_t length;
+    size_t count = 0;
+
+    if (!text) return 0;
+    terminator = memchr(text, '\0', sizeof(copy));
+    if (!terminator) return 0;
+    length = (size_t)(terminator - text);
+    if (length >= sizeof(copy)) return 0;
+    memcpy(copy, text, length + 1);
+    char *cursor = copy;
+    while (*cursor) {
+        if (count == sizeof(tokens) / sizeof(tokens[0])) return 0;
+        tokens[count++] = cursor;
+        while (*cursor && *cursor != ' ') ++cursor;
+        if (*cursor) {
+            *cursor++ = '\0';
+            if (!*cursor || *cursor == ' ') return 0;
+        }
+    }
+    if (count < 4 || strcmp(tokens[0], "SIM1") != 0 ||
+        !parse_sim_number(tokens[1], NUM_INTERSECTIONS - 1, target) ||
+        !parse_sim_number(tokens[2], UINT16_MAX, command_id) ||
+        *command_id == 0) return 0;
+    if (count == 4 && strcmp(tokens[3], "START") == 0) {
+        *action = 1;
+        return 1;
+    }
+    if (count == 4 && strcmp(tokens[3], "STOP") == 0) {
+        *action = 2;
+        return 1;
+    }
+    if (count == 5 && strcmp(tokens[3], "TIME") == 0 &&
+        parse_sim_number(tokens[4], 1439, minute)) {
+        *action = 3;
+        return 1;
+    }
+    return 0;
+}
+
+#if ENABLE_TRAFFIC_SIMULATION
+static int handle_simulation_message(int rcvid, test_message_t *msg,
+                                     reply_t *reply, void *ctx) {
+    local_state_t *s = (local_state_t *)ctx;
+    unsigned target = 0, command_id = 0, minute = 0;
+    int action = 0;
+    int accepted = 0;
+
+    (void)rcvid;
+    if (!parse_sim_command(msg->data, &target, &command_id, &minute, &action)) {
+        reply->status = -1;
+        get_timestamp(reply->timestamp, sizeof(reply->timestamp));
+        return 0;
+    }
+    reply->command_id = (uint16_t)command_id;
+    pthread_mutex_lock(&s->mutex);
+    if (msg->header.src == CONTROLLER_CENTRAL &&
+        msg->header.dst == CONTROLLER_LOCAL &&
+        target_matches_local((uint8_t)target)) {
+        strncpy(s->last_recv_central, msg->header.timestamp,
+                sizeof(s->last_recv_central) - 1);
+        get_timestamp(s->last_central_update, sizeof(s->last_central_update));
+        if (action == 1) {
+            s->sim_running = 1;
+            s->next_ns_car_in_seconds = random_car_gap_seconds();
+            s->next_ew_car_in_seconds = random_car_gap_seconds();
+            s->next_train_in_seconds = random_train_gap_seconds();
+            s->next_train_direction = random_train_direction();
+            accepted = 1;
+        } else if (action == 2) {
+            s->sim_running = 0;
+            accepted = 1;
+        } else {
+            set_sim_minute_locked(minute);
+            accepted = 1;
+        }
+        if (accepted) mark_status_dirty_locked();
+        s->ui_needs_update = 1;
+    }
+    pthread_mutex_unlock(&s->mutex);
+    reply->status = accepted ? 0 : -1;
+    get_timestamp(reply->timestamp, sizeof(reply->timestamp));
+    return 0;
+}
+#endif
 
 static int handle_test_message(int rcvid, test_message_t *msg,
                                reply_t *reply, void *ctx) {
@@ -226,6 +334,9 @@ static int handle_railway_message(int rcvid, test_message_t *msg,
 }
 
 static message_handler_entry_t handlers[] = {
+#if ENABLE_TRAFFIC_SIMULATION
+    { MSG_TEST, CONTROLLER_CENTRAL, handle_simulation_message },
+#endif
     { MSG_TEST, 0, handle_test_message },
     { MSG_MODE_COMMAND, CONTROLLER_CENTRAL, handle_mode_command },
     { MSG_COORDINATION_COMMAND, CONTROLLER_CENTRAL, handle_coordination_command },

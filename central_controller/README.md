@@ -126,9 +126,11 @@ coordination-offset, fail-safe and real Train multi-Local delivery behavior. See
 
 Traffic simulation stays in Local. Central's new `sim-start`, `sim-stop` and
 `sim-time` commands send the versioned `SIM1` contract documented there. The
-current Local `MSG_TEST` handler does not implement that contract; its generic
-ID-zero ACK is `UNCONFIRMED`. The Local owner must add the handler before an
-integrated simulation-control demo. These commands require an explicit target.
+Local handler validates the target, action and command ID, applies the request,
+and returns the same ID so Central can record an `ACCEPTED` receipt. These
+commands require an explicit target. The Central fixture still uses a generic
+legacy `MSG_TEST` handler, so fixture-only simulation tests intentionally remain
+`UNCONFIRMED`; run them against the real Local for end-to-end control.
 Central displays received pedestrian bits as WALK/STOP and railway preemption
 as ACTIVE/CLEAR. Telemetry version 1 also carries vehicle counts, requested
 pedestrians and simulated time.
