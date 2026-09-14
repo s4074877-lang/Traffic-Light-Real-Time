@@ -46,10 +46,25 @@ static int clamp_green_time(int seconds) {
     return seconds;
 }
 
+static int configured_green_time_for_direction(direction_t direction) {
+    int seconds = direction == DIR_NS ? state.ns_green_sec : state.ew_green_sec;
+
+    if (seconds <= 0) {
+        seconds = GREEN_BASE_SEC;
+    }
+
+    return clamp_green_time(seconds);
+}
+
+int local_fixed_cycle_seconds_locked(void) {
+    return configured_green_time_for_direction(DIR_NS) + YELLOW_SEC +
+           configured_green_time_for_direction(DIR_EW) + YELLOW_SEC;
+}
+
 int green_time_for_direction(direction_t direction) {
     int ns_high = state.sensor_ns_count >= SENSOR_CAR_THRESHOLD;
     int ew_high = state.sensor_ew_count >= SENSOR_CAR_THRESHOLD;
-    int seconds = GREEN_BASE_SEC;
+    int seconds = configured_green_time_for_direction(direction);
 
     if (state.traffic_mode == MODE_SENSOR) {
         if (direction == DIR_NS && ns_high && !ew_high) {
@@ -290,8 +305,20 @@ static void set_phase_locked(phase_t phase, int duration) {
     mark_status_dirty_locked();
 }
 
+static void set_initial_phase_locked(void) {
+    direction_t direction =
+        state.initial_phase == PHASE_EW_GREEN ? DIR_EW : DIR_NS;
+    set_phase_locked(state.initial_phase, green_time_for_direction(direction));
+}
+
 static void set_coordination_phase_locked(phase_t base_phase, int offset_sec) {
-    int cycle_sec = 2 * (GREEN_BASE_SEC + YELLOW_SEC);
+    direction_t first_direction =
+        base_phase == PHASE_NS_GREEN ? DIR_NS : DIR_EW;
+    direction_t second_direction =
+        base_phase == PHASE_NS_GREEN ? DIR_EW : DIR_NS;
+    int first_green_sec = configured_green_time_for_direction(first_direction);
+    int second_green_sec = configured_green_time_for_direction(second_direction);
+    int cycle_sec = first_green_sec + second_green_sec + 2 * YELLOW_SEC;
     int offset = offset_sec % cycle_sec;
     phase_t first_green = base_phase;
     phase_t first_yellow =
@@ -301,14 +328,15 @@ static void set_coordination_phase_locked(phase_t base_phase, int offset_sec) {
     phase_t second_yellow =
         base_phase == PHASE_NS_GREEN ? PHASE_EW_YELLOW : PHASE_NS_YELLOW;
 
-    if (offset < GREEN_BASE_SEC) {
-        set_phase_locked(first_green, GREEN_BASE_SEC - offset);
-    } else if (offset < GREEN_BASE_SEC + YELLOW_SEC) {
+    if (offset < first_green_sec) {
+        set_phase_locked(first_green, first_green_sec - offset);
+    } else if (offset < first_green_sec + YELLOW_SEC) {
         set_phase_locked(first_yellow,
-                         GREEN_BASE_SEC + YELLOW_SEC - offset);
-    } else if (offset < 2 * GREEN_BASE_SEC + YELLOW_SEC) {
+                         first_green_sec + YELLOW_SEC - offset);
+    } else if (offset < first_green_sec + YELLOW_SEC + second_green_sec) {
         set_phase_locked(second_green,
-                         2 * GREEN_BASE_SEC + YELLOW_SEC - offset);
+                         first_green_sec + YELLOW_SEC + second_green_sec -
+                         offset);
     } else {
         set_phase_locked(second_yellow, cycle_sec - offset);
     }
@@ -401,7 +429,7 @@ void traffic_tick_locked(void) {
                 state.next_train_direction = random_train_direction();
             }
 #endif
-            set_phase_locked(PHASE_NS_GREEN, green_time_for_direction(DIR_NS));
+            set_initial_phase_locked();
         }
         return;
     }
@@ -693,6 +721,6 @@ void reset_demo_inputs_locked(void) {
 #else
     state.traffic_mode = MODE_FIXED;
 #endif
-    set_phase_locked(PHASE_NS_GREEN, green_time_for_direction(DIR_NS));
+    set_initial_phase_locked();
     mark_status_dirty_locked();
 }

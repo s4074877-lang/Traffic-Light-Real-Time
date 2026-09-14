@@ -24,6 +24,17 @@ static const char* light_text(light_state_t light) {
     }
 }
 
+static const char* phase_text(phase_t phase) {
+    switch (phase) {
+        case PHASE_NS_GREEN:     return "NS_GREEN";
+        case PHASE_NS_YELLOW:    return "NS_YELLOW";
+        case PHASE_EW_GREEN:     return "EW_GREEN";
+        case PHASE_EW_YELLOW:    return "EW_YELLOW";
+        case PHASE_RAILWAY_HOLD: return "RAILWAY_HOLD";
+        default:                 return "UNKNOWN";
+    }
+}
+
 #if ENABLE_TRAFFIC_SIMULATION
 static const char* period_text(int seconds) {
     if (is_peak_time(seconds)) {
@@ -128,6 +139,12 @@ void display_ui(void) {
 
     printf("%s========================================================%s\n", COLOR_BOLD, COLOR_RESET);
     printf("Traffic mode [%s]\n", mode_text(display_mode()));
+    printf("Phase [%s] remaining [%d sec]\n",
+           phase_text(state.phase), state.time_remaining);
+    printf("Timing profile: initial [%s] cycle [%d sec]\n",
+           phase_text(state.initial_phase), local_fixed_cycle_seconds_locked());
+    printf("  NS green [%d sec] EW green [%d sec]\n",
+           state.ns_green_sec, state.ew_green_sec);
     printf("Telemetry seq [%u] last command [%u] health [%s]\n",
            (unsigned)state.status_sequence,
            (unsigned)state.last_applied_command_id,

@@ -5,6 +5,7 @@ OUTPUT_DIR = ../build/tests-$(PLATFORM)
 TARGET = $(OUTPUT_DIR)/local_logic_test
 
 LOCAL_SOURCES = ../src/local_state.c \
+                ../src/local_config.c \
                 ../src/local_traffic.c \
                 ../../common/communication/connection.c
 
