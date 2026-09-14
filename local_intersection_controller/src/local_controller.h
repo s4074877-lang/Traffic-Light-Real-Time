@@ -145,8 +145,9 @@ void reset_demo_inputs_locked(void);
 void toggle_sensor_locked(direction_t direction);
 #endif
 
-#if ENABLE_DEMO_COMMANDS && ENABLE_TRAFFIC_SIMULATION
+#if ENABLE_TRAFFIC_SIMULATION
 void set_sim_hour_locked(int hour);
+void set_sim_minute_locked(unsigned minute);
 #endif
 
 void display_ui(void);

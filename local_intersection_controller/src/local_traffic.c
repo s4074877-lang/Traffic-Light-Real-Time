@@ -515,7 +515,7 @@ void update_time_of_day_locked(void) {
 #endif
 }
 
-#if ENABLE_DEMO_COMMANDS && ENABLE_TRAFFIC_SIMULATION
+#if ENABLE_TRAFFIC_SIMULATION
 static void set_sim_seconds_locked(int seconds) {
     state.sim_seconds = seconds % SECONDS_PER_DAY;
     if (state.sim_seconds < 0) {
@@ -534,6 +534,12 @@ void set_sim_hour_locked(int hour) {
     state.manual_mode_override = 0;
     state.manual_sensor_override = 0;
     set_sim_seconds_locked(hour * 3600);
+}
+
+void set_sim_minute_locked(unsigned minute) {
+    state.manual_mode_override = 0;
+    state.manual_sensor_override = 0;
+    set_sim_seconds_locked((int)(minute * 60U));
 }
 #endif
 
