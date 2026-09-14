@@ -42,9 +42,10 @@ Local state machine. Current pending checks are:
 - Implement/test `SIM1` START/STOP/TIME on Local, including malformed/unsupported
   requests, matching rejection IDs, idempotence, preserving manual overrides and
   uninterrupted phases/pedestrian/railway handling when generation stops.
-- Resolve Local temporary replacement/revert baseline and coordination offset;
-  demonstrate mode expiry while Central is disconnected.
-- Agree pedestrian NS/EW geometry, Yellow and the 10-second cap; exercise
+- Run `make -C local_intersection_controller/tests run` on QNX and keep its
+  output with the final report evidence.
+- Demonstrate mode expiry while Central is disconnected.
+- Exercise pedestrian NS/EW geometry, Yellow and the 10-second cap; exercise
   latched all-red fail-safe and real-train takeover of a simulated event.
 - Complete real Train/Local routing and intended-node integration. See
   [INTEGRATION.md](INTEGRATION.md) for the observed peer-owned gaps.

@@ -1,6 +1,13 @@
 #include "local_controller.h"
 
+#include <errno.h>
+#include <time.h>
 #include <unistd.h>
+
+static void status_deadline(struct timespec *deadline) {
+    clock_gettime(CLOCK_MONOTONIC, deadline);
+    deadline->tv_sec += STATUS_PERIOD_SEC;
+}
 
 void* connection_thread(void *arg) {
     (void)arg;
@@ -81,20 +88,36 @@ void* status_thread(void *arg) {
         reply_t reply;
         int send_status = 0;
         int send_fault = 0;
-
-        sleep(STATUS_PERIOD_SEC);
+        uint16_t status_sequence = 0;
+        uint16_t fault_sequence = 0;
 
         pthread_mutex_lock(&state.mutex);
+        struct timespec deadline;
+        status_deadline(&deadline);
+        while (!state.status_dirty && !state.fault_pending) {
+            int wait_result =
+                pthread_cond_timedwait(&state.status_cond, &state.mutex,
+                                       &deadline);
+            if (wait_result == ETIMEDOUT || wait_result != 0) {
+                break;
+            }
+        }
+
         if (state.central_conn.connected) {
-            prepare_status_message_locked(&status_msg);
+            status_sequence = prepare_status_message_locked(&status_msg);
             send_status = 1;
 
             if (state.fault_pending) {
-                prepare_fault_message_locked(&fault_msg);
+                fault_sequence = prepare_fault_message_locked(&fault_msg);
                 send_fault = 1;
             }
         }
         pthread_mutex_unlock(&state.mutex);
+
+        if (!send_status && !send_fault) {
+            sleep(STATUS_PERIOD_SEC);
+            continue;
+        }
 
         if (send_fault || send_status) {
             pthread_mutex_lock(&state.central_send_mutex);
@@ -102,7 +125,9 @@ void* status_thread(void *arg) {
             if (send_fault && send_message(&state.central_conn, &fault_msg, &reply) == 0 &&
                 reply.status == 0) {
                 pthread_mutex_lock(&state.mutex);
-                state.fault_pending = 0;
+                if (state.fault_sequence == fault_sequence) {
+                    state.fault_pending = 0;
+                }
                 get_timestamp(state.last_send_central,
                               sizeof(state.last_send_central));
                 state.ui_needs_update = 1;
@@ -112,6 +137,9 @@ void* status_thread(void *arg) {
             if (send_status && send_message(&state.central_conn, &status_msg, &reply) == 0 &&
                 reply.status == 0) {
                 pthread_mutex_lock(&state.mutex);
+                if (state.status_sequence == status_sequence) {
+                    state.status_dirty = 0;
+                }
                 get_timestamp(state.last_send_central,
                               sizeof(state.last_send_central));
                 state.ui_needs_update = 1;
@@ -133,9 +161,15 @@ void* heartbeat_thread(void *arg) {
 
         if (connection_is_connected(&state.central_conn)) {
             int heartbeat_failed;
+            test_message_t heartbeat_msg;
+            reply_t reply;
+            pthread_mutex_lock(&state.mutex);
+            prepare_heartbeat_message_locked(&heartbeat_msg);
+            pthread_mutex_unlock(&state.mutex);
+
             pthread_mutex_lock(&state.central_send_mutex);
             heartbeat_failed =
-                send_heartbeat(&state.central_conn, CONTROLLER_LOCAL, CONTROLLER_CENTRAL);
+                send_message(&state.central_conn, &heartbeat_msg, &reply);
             pthread_mutex_unlock(&state.central_send_mutex);
 
             if (heartbeat_failed != 0) {

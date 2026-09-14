@@ -1,0 +1,42 @@
+# Local validation
+
+This file records Local-controller checks that are owned by the Local module.
+It separates source-level harness evidence from full QNX integration evidence.
+
+## Local core harness
+
+Run on a QNX target with the QNX toolchain available:
+
+```sh
+make -C local_intersection_controller/tests run
+```
+
+The `local_logic_test` harness exercises the Local state-machine functions
+directly without starting Central or Train:
+
+- status telemetry fits the existing `test_message_t.data` envelope and reports
+  sequence, sensor counts, pedestrian requests, simulated time, train state,
+  fault state and last accepted command ID;
+- Local heartbeat payload reports `sender_id`, `healthy` and a nonzero sequence;
+- runtime intersection matching accepts I1-I6 targets and railway filtering maps
+  P1 to I1/I2, P2 to I3/I4 and P3 to I5/I6;
+- the fixed 20s green / 2s yellow phase cycle advances while Central is offline;
+- sensor mode adjusts green time using the configured threshold and bounds;
+- a `ped_NS` request during `EW_GREEN` caps that compatible green to 10 seconds
+  and transfers the removed time to the next NS vehicle green;
+- railway preemption safely terminates green through yellow, holds all-red until
+  `TRAIN_CLEAR`, then runs the recovery hold before normal traffic resumes.
+
+## Integration proof still required
+
+The harness is not a replacement for the final real-time demonstration. On the
+target system, still record an end-to-end run with actual QNX processes:
+
+- Local status and typed heartbeat received by Central, including degraded
+  health when Local raises a fault;
+- phase/status refresh timing from Local state change to Central display;
+- Local continuing fixed/sensor/pedestrian/railway logic while Central is killed;
+- railway preemption and clear using the real Train process, including delivery
+  to both Local services affected by the crossing;
+- CPU/load notes and `CLOCK_MONOTONIC` timestamps for the timing claims in the
+  final report.

@@ -17,10 +17,7 @@
 #define TRAIN_PASSING_SECONDS 10
 #define MAX_SENSOR_CARS 12
 #define STATUS_PERIOD_SEC 1
-
-#ifndef LOCAL_INTERSECTION_ID
-#define LOCAL_INTERSECTION_ID I1
-#endif
+#define LOCAL_SERVICE_NAME_MAX 64
 
 /*
  * Demo switches:
@@ -38,6 +35,7 @@ typedef struct {
     connection_t central_conn;
     connection_t train_conn;
     connection_mode_t mode;
+    char service_name[LOCAL_SERVICE_NAME_MAX];
 
     char last_recv_central[32];
     char last_recv_train[32];
@@ -95,7 +93,12 @@ typedef struct {
 
     int ui_needs_update;
     int status_dirty;
+    uint16_t status_sequence;
+    uint16_t fault_sequence;
+    uint16_t heartbeat_sequence;
+    uint16_t last_applied_command_id;
 
+    pthread_cond_t status_cond;
     pthread_mutex_t mutex;
     pthread_mutex_t central_send_mutex;
     pthread_mutex_t train_send_mutex;
@@ -103,7 +106,8 @@ typedef struct {
 
 extern local_state_t state;
 
-void local_state_init(connection_mode_t mode);
+void local_state_init(connection_mode_t mode, uint8_t intersection_id,
+                      const char *service_name);
 void local_state_destroy(void);
 
 void mark_status_dirty_locked(void);
@@ -115,8 +119,9 @@ int railway_display_line(uint8_t id);
 void init_message(test_message_t *msg, msg_type_t type,
                   controller_type_t src, controller_type_t dst);
 void fill_status_locked(status_msg_t *status);
-void prepare_status_message_locked(test_message_t *msg);
-void prepare_fault_message_locked(test_message_t *msg);
+uint16_t prepare_status_message_locked(test_message_t *msg);
+uint16_t prepare_fault_message_locked(test_message_t *msg);
+uint16_t prepare_heartbeat_message_locked(test_message_t *msg);
 void set_fault_locked(fault_type_t type, fault_severity_t severity,
                       const char *description);
 void clear_fault_locked(void);

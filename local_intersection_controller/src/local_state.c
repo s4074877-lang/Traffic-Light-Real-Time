@@ -6,8 +6,17 @@
 
 local_state_t state;
 
+static void bump_sequence(uint16_t *value) {
+    ++(*value);
+    if (*value == 0) {
+        ++(*value);
+    }
+}
+
 void mark_status_dirty_locked(void) {
     state.status_dirty = 1;
+    bump_sequence(&state.status_sequence);
+    pthread_cond_signal(&state.status_cond);
     state.ui_needs_update = 1;
 }
 
@@ -23,17 +32,25 @@ int target_matches_local(uint8_t target) {
     return target == state.intersection_id || target == INTERSECTION_ALL;
 }
 
-int railway_matches_local(uint8_t id) {
-    if (state.intersection_id != I1) {
-        return 0;
+static uint8_t railway_crossing_for_local(uint8_t intersection_id) {
+    if (intersection_id <= I2) {
+        return 1;
     }
+    if (intersection_id <= I4) {
+        return 2;
+    }
+    return 3;
+}
+
+int railway_matches_local(uint8_t id) {
+    uint8_t crossing = railway_crossing_for_local(state.intersection_id);
 
     /*
-     * I1 is affected by railway crossing P1 only.
-     * Current Train code sends crossing_t.id as 1 for P1.
-     * The shared protocol enum also has P1 as 0, so accept both.
+     * Current Train code sends crossing_t.id as 1..3 for P1..P3.
+     * Accept protocol P1's zero only because it is unambiguous with that
+     * dialect; P2/P3 use the current Train IDs 2/3 here.
      */
-    return id == 1 || id == P1;
+    return id == crossing || (crossing == 1 && id == P1);
 }
 
 int railway_display_line(uint8_t id) {
@@ -53,6 +70,11 @@ void init_message(test_message_t *msg, msg_type_t type,
 }
 
 void fill_status_locked(status_msg_t *status) {
+    int sim_seconds = state.sim_seconds % SECONDS_PER_DAY;
+    if (sim_seconds < 0) {
+        sim_seconds += SECONDS_PER_DAY;
+    }
+
     memset(status, 0, sizeof(*status));
     status->intersection_id = state.intersection_id;
     status->mode = display_mode();
@@ -66,20 +88,45 @@ void fill_status_locked(status_msg_t *status) {
          state.train_recovery_remaining > 0) ? 1 : 0;
     status->time_remaining = (uint16_t)(state.time_remaining > 0 ?
         state.time_remaining : 0);
+    status->telemetry_version = STATUS_TELEMETRY_VERSION;
+    status->status_sequence = state.status_sequence;
+    status->last_command_id = state.last_applied_command_id;
+    status->sim_minute_of_day = (uint16_t)(sim_seconds / 60);
+    status->temporary_remaining = (uint16_t)(state.temp_mode_remaining > 0 ?
+        state.temp_mode_remaining : 0);
+    status->coordination_offset_sec = (uint16_t)(state.coordination_offset_sec > 0 ?
+        state.coordination_offset_sec : 0);
+    status->sensor_ns_count = (uint8_t)state.sensor_ns_count;
+    status->sensor_ew_count = (uint8_t)state.sensor_ew_count;
+    status->pedestrian_ns_request = state.ped_ns_request ? 1 : 0;
+    status->pedestrian_ew_request = state.ped_ew_request ? 1 : 0;
+    status->sim_running = state.sim_running ? 1 : 0;
+    status->train_pending = state.train_pending ? 1 : 0;
+    status->train_active = state.train_active ? 1 : 0;
+    status->train_recovery_remaining =
+        (uint8_t)(state.train_recovery_remaining > 0 ?
+                  state.train_recovery_remaining : 0);
+    status->manual_mode_override = state.manual_mode_override ? 1 : 0;
+    status->manual_sensor_override = state.manual_sensor_override ? 1 : 0;
+    status->coordination_pending = state.coordination_pending ? 1 : 0;
+    status->fault_active = state.fault_active ? 1 : 0;
+    status->fault_type = state.fault_type;
+    status->fault_severity = state.fault_active ? state.fault_severity : 0;
 }
 
-void prepare_status_message_locked(test_message_t *msg) {
+uint16_t prepare_status_message_locked(test_message_t *msg) {
     status_msg_t status;
     init_message(msg, MSG_STATUS_UPDATE, CONTROLLER_LOCAL, CONTROLLER_CENTRAL);
     fill_status_locked(&status);
     memcpy(msg->data, &status, sizeof(status));
-    state.status_dirty = 0;
+    return status.status_sequence;
 }
 
 void set_fault_locked(fault_type_t type, fault_severity_t severity,
                       const char *description) {
     state.fault_active = type != FAULT_NONE;
     state.fault_pending = 1;
+    bump_sequence(&state.fault_sequence);
     state.fault_type = type;
     state.fault_severity = severity;
     snprintf(state.fault_description, sizeof(state.fault_description),
@@ -90,6 +137,7 @@ void set_fault_locked(fault_type_t type, fault_severity_t severity,
 void clear_fault_locked(void) {
     state.fault_active = 0;
     state.fault_pending = 1;
+    bump_sequence(&state.fault_sequence);
     state.fault_type = FAULT_NONE;
     state.fault_severity = SEV_LOW;
     snprintf(state.fault_description, sizeof(state.fault_description),
@@ -97,7 +145,7 @@ void clear_fault_locked(void) {
     mark_status_dirty_locked();
 }
 
-void prepare_fault_message_locked(test_message_t *msg) {
+uint16_t prepare_fault_message_locked(test_message_t *msg) {
     fault_msg_t fault;
     init_message(msg, MSG_FAULT_ALERT, CONTROLLER_LOCAL, CONTROLLER_CENTRAL);
     memset(&fault, 0, sizeof(fault));
@@ -107,9 +155,24 @@ void prepare_fault_message_locked(test_message_t *msg) {
     snprintf(fault.description, sizeof(fault.description),
              "%s", state.fault_description);
     memcpy(msg->data, &fault, sizeof(fault));
+    return state.fault_sequence;
 }
 
-void local_state_init(connection_mode_t mode) {
+uint16_t prepare_heartbeat_message_locked(test_message_t *msg) {
+    heartbeat_msg_t heartbeat;
+    init_message(msg, MSG_HEARTBEAT, CONTROLLER_LOCAL, CONTROLLER_CENTRAL);
+    memset(&heartbeat, 0, sizeof(heartbeat));
+    heartbeat.sender_id = state.intersection_id;
+    heartbeat.healthy = (!state.fault_active && state.traffic_mode != MODE_FAILSAFE) ? 1 : 0;
+    bump_sequence(&state.heartbeat_sequence);
+    heartbeat.sequence = state.heartbeat_sequence;
+    memcpy(msg->data, &heartbeat, sizeof(heartbeat));
+    return heartbeat.sequence;
+}
+
+void local_state_init(connection_mode_t mode, uint8_t intersection_id,
+                      const char *service_name) {
+    pthread_condattr_t status_cond_attr;
 #if ENABLE_TRAFFIC_SIMULATION
     srand((unsigned)time(NULL));
 #endif
@@ -117,10 +180,21 @@ void local_state_init(connection_mode_t mode) {
     pthread_mutex_init(&state.mutex, NULL);
     pthread_mutex_init(&state.central_send_mutex, NULL);
     pthread_mutex_init(&state.train_send_mutex, NULL);
+    pthread_condattr_init(&status_cond_attr);
+    pthread_condattr_setclock(&status_cond_attr, CLOCK_MONOTONIC);
+    pthread_cond_init(&state.status_cond, &status_cond_attr);
+    pthread_condattr_destroy(&status_cond_attr);
     state.mode = mode;
     state.ui_needs_update = 1;
     state.status_dirty = 1;
-    state.intersection_id = LOCAL_INTERSECTION_ID;
+    state.status_sequence = 1;
+    state.fault_sequence = 1;
+    if (intersection_id >= NUM_INTERSECTIONS) {
+        intersection_id = I1;
+    }
+    state.intersection_id = intersection_id;
+    snprintf(state.service_name, sizeof(state.service_name), "%s",
+             service_name != NULL ? service_name : LOCAL_SERVICE_NAME);
 #if ENABLE_TRAFFIC_SIMULATION
     state.sim_running = 1;
     state.sim_seconds = 6 * 3600;
@@ -145,6 +219,7 @@ void local_state_init(connection_mode_t mode) {
 void local_state_destroy(void) {
     connection_close(&state.central_conn);
     connection_close(&state.train_conn);
+    pthread_cond_destroy(&state.status_cond);
     pthread_mutex_destroy(&state.mutex);
     pthread_mutex_destroy(&state.central_send_mutex);
     pthread_mutex_destroy(&state.train_send_mutex);

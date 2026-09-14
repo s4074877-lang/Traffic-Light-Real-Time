@@ -97,7 +97,15 @@ int central_frame_valid(const test_message_t *message, size_t size,
                 value.intersection_id < NUM_INTERSECTIONS && value.mode <= MODE_FAILSAFE &&
                 value.phase <= PHASE_RAILWAY_HOLD && value.ns_state <= LIGHT_GREEN &&
                 value.ew_state <= LIGHT_GREEN && value.pedestrian_ns <= 1 &&
-                value.pedestrian_ew <= 1 && value.railway_preempt <= 1;
+                value.pedestrian_ew <= 1 && value.railway_preempt <= 1 &&
+                value.telemetry_version <= STATUS_TELEMETRY_VERSION && value.reserved == 0 &&
+                value.pedestrian_ns_request <= 1 && value.pedestrian_ew_request <= 1 &&
+                value.sim_running <= 1 && value.train_pending <= 1 &&
+                value.train_active <= 1 && value.manual_mode_override <= 1 &&
+                value.manual_sensor_override <= 1 && value.coordination_pending <= 1 &&
+                value.fault_active <= 1 && value.fault_type <= FAULT_NOT_WORKING &&
+                value.fault_severity <= SEV_CRITICAL &&
+                (value.telemetry_version == 0 || value.sim_minute_of_day < 24 * 60);
         }
         case MSG_RAILWAY_STATUS: {
             railway_status_msg_t value;

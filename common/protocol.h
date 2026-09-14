@@ -34,6 +34,8 @@
 #define HEARTBEAT_MISS_LIMIT 3  // 3 misses = link down
 #define RAILWAY_RECOVERY_SEC 2  // hold red after TRAIN_CLEAR
 
+#define STATUS_TELEMETRY_VERSION 1
+
 // ============================================
 // Message routing
 // ============================================
@@ -229,6 +231,27 @@ typedef struct { // Intersection status payload (for MSG_STATUS_UPDATE)
     uint8_t pedestrian_ew;      // Pedestrian E-W crossing active
     uint8_t railway_preempt;    // 1 = railway preemption active
     uint16_t time_remaining;    // Seconds until next change
+    uint8_t telemetry_version;  // 0 = legacy/basic status only
+    uint8_t reserved;
+    uint16_t status_sequence;   // Local state-change sequence
+    uint16_t last_command_id;   // Last accepted Central command ID
+    uint16_t sim_minute_of_day; // Local simulated HH:MM as 0..1439
+    uint16_t temporary_remaining;
+    uint16_t coordination_offset_sec;
+    uint8_t sensor_ns_count;
+    uint8_t sensor_ew_count;
+    uint8_t pedestrian_ns_request;
+    uint8_t pedestrian_ew_request;
+    uint8_t sim_running;
+    uint8_t train_pending;
+    uint8_t train_active;
+    uint8_t train_recovery_remaining;
+    uint8_t manual_mode_override;
+    uint8_t manual_sensor_override;
+    uint8_t coordination_pending;
+    uint8_t fault_active;
+    uint8_t fault_type;         // fault_type_t
+    uint8_t fault_severity;     // fault_severity_t, or 0 when none
 } status_msg_t;
 
 // Fault alert payload (for MSG_FAULT_ALERT)

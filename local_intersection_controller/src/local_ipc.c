@@ -81,6 +81,7 @@ static int handle_mode_command(int rcvid, test_message_t *msg,
         }
 
         if (accepted) {
+            s->last_applied_command_id = command.command_id;
             mark_status_dirty_locked();
         }
     }
@@ -124,6 +125,7 @@ static int handle_coordination_command(int rcvid, test_message_t *msg,
             !(s->phase == command.phase && s->time_remaining > 0);
         clear_fault_locked();
         accepted = 1;
+        s->last_applied_command_id = command.command_id;
         mark_status_dirty_locked();
     }
 

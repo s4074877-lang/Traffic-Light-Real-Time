@@ -100,7 +100,8 @@ See [INTEGRATION.md](INTEGRATION.md) for the exact peer issue.
 replies success even when its simulator says BUSY and discards the result string;
 Central labels this limitation. A timeout/invalid reply is `UNCONFIRMED` and is
 never automatically resent. Subsequent status remains the source of reported
-operation; it has no applied-command ID.
+operation. Legacy/basic Local status has no applied-command ID; telemetry
+version 1 reports the last accepted Central command ID.
 
 Queues hold 32 requests **per endpoint**, with 64 shared history records. Broadcast
 admission checks every target/capacity first; subsequent execution can differ.
@@ -113,12 +114,15 @@ simultaneous Local application.
 ## Demonstration with the merged Local
 
 Start Central without `--schedule`, as shown above, so Local's simulated clock
-owns peak/offpeak/night mode selection. Current Local is hardcoded to I1; target
-`I1` when testing against that process. Other rows/routes are capacity, not running
-Local state machines. Local now publishes status each second and handles
-fixed/sensor/temp/revert/coordination requests with command IDs, but source review
-found unresolved temporary-baseline/revert, coordination-offset, pedestrian,
-fail-safe and real-train takeover behavior. See [INTEGRATION.md](INTEGRATION.md).
+owns peak/offpeak/night mode selection. Launch each Local process with its runtime
+intersection and service name when testing multiple rows, for example
+`./local_intersection_controller -g -i I2 -n traffic_local_I2`, then map Central
+with `--local-endpoint I2=traffic_local_I2`. If no `-i` is supplied, Local keeps
+the legacy I1 service `traffic_local_controller`. Local now publishes status each
+second and handles fixed/sensor/temp/revert/coordination requests with command
+IDs, but source review still found unresolved temporary-baseline/revert,
+coordination-offset, fail-safe and real Train multi-Local delivery behavior. See
+[INTEGRATION.md](INTEGRATION.md).
 
 Traffic simulation stays in Local. Central's new `sim-start`, `sim-stop` and
 `sim-time` commands send the versioned `SIM1` contract documented there. The
@@ -126,8 +130,8 @@ current Local `MSG_TEST` handler does not implement that contract; its generic
 ID-zero ACK is `UNCONFIRMED`. The Local owner must add the handler before an
 integrated simulation-control demo. These commands require an explicit target.
 Central displays received pedestrian bits as WALK/STOP and railway preemption
-as ACTIVE/CLEAR. Vehicle counts, requested pedestrians and simulated time are not
-in status v1 and are not inferred for the dashboard.
+as ACTIVE/CLEAR. Telemetry version 1 also carries vehicle counts, requested
+pedestrians and simulated time.
 
 The chat does not confirm removal of Yellow. Current Red -> Green -> Yellow ->
 Red already changes directly from Red to Green. WALK represents pedestrian

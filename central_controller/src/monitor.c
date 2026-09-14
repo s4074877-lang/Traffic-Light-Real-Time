@@ -85,7 +85,14 @@ int central_monitor_status(central_monitor_t *m, const status_msg_t *s, uint64_t
     if (s->intersection_id >= NUM_INTERSECTIONS || s->mode > MODE_FAILSAFE ||
         s->phase > PHASE_RAILWAY_HOLD || s->ns_state > LIGHT_GREEN ||
         s->ew_state > LIGHT_GREEN || s->pedestrian_ns > 1 || s->pedestrian_ew > 1 ||
-        s->railway_preempt > 1) return 0;
+        s->railway_preempt > 1 ||
+        s->telemetry_version > STATUS_TELEMETRY_VERSION || s->reserved != 0 ||
+        s->pedestrian_ns_request > 1 || s->pedestrian_ew_request > 1 ||
+        s->sim_running > 1 || s->train_pending > 1 || s->train_active > 1 ||
+        s->manual_mode_override > 1 || s->manual_sensor_override > 1 ||
+        s->coordination_pending > 1 || s->fault_active > 1 ||
+        s->fault_type > FAULT_NOT_WORKING || s->fault_severity > SEV_CRITICAL ||
+        (s->telemetry_version != 0 && s->sim_minute_of_day >= 24 * 60)) return 0;
     central_observe_peer(m, CONTROLLER_LOCAL, now);
     entry = &m->intersections[s->intersection_id];
     entry->valid = 1;

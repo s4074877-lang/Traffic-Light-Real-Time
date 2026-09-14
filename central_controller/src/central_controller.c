@@ -226,7 +226,7 @@ static void print_help(void) {
            "sim-stop stops generated traffic inputs; Local light control continues.\n"
            "Use Local simulated time for traffic demos with Central --schedule disabled.\n"
            "Direct p#-fault is blocked: the current Train remote handler can deadlock.\n"
-           "Current Local validates coordination offsets but does not apply them yet.\n"
+           "Current Local stores validated coordination offsets and applies them at a safe phase boundary.\n"
            "coordinate-at sets a Central dispatch time; v1 has no shared activation epoch.\n");
 }
 
@@ -276,6 +276,24 @@ static void display_ui(void) {
                status->pedestrian_ns ? "WALK" : "STOP", status->pedestrian_ew ? "WALK" : "STOP",
                status->railway_preempt ? "ACTIVE" : "CLEAR",
                status->time_remaining, age_seconds(now, entry->received_at), freshness);
+        if (status->telemetry_version) {
+            output("    Seq %u Cmd %u Sensors NS/EW %u/%u PedReq %u/%u Sim %s %02u:%02u Train P/A/R %u/%u/%us Fault %s\n",
+                   (unsigned)status->status_sequence,
+                   (unsigned)status->last_command_id,
+                   (unsigned)status->sensor_ns_count,
+                   (unsigned)status->sensor_ew_count,
+                   (unsigned)status->pedestrian_ns_request,
+                   (unsigned)status->pedestrian_ew_request,
+                   status->sim_running ? "RUN" : "STOP",
+                   (unsigned)status->sim_minute_of_day / 60,
+                   (unsigned)status->sim_minute_of_day % 60,
+                   (unsigned)status->train_pending,
+                   (unsigned)status->train_active,
+                   (unsigned)status->train_recovery_remaining,
+                   status->fault_active ? fault_name(status->fault_type) : "NONE");
+        } else {
+            output("    Extended Local telemetry not reported by this peer\n");
+        }
         if (central_monitor_health(&view, CONTROLLER_LOCAL, i) == 0)
             output("    Reported health DEGRADED; commands blocked until explicit recovery\n");
     }

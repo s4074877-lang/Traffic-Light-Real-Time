@@ -8,8 +8,11 @@
 # Terminal 1
 /tmp/central_controller -l
 
-# Terminal 2
+# Terminal 2, legacy I1 service
 /tmp/local_intersection_controller -l
+
+# Or run a specific Local instance/service
+/tmp/local_intersection_controller -l -i I2 -n traffic_local_I2
 
 # Terminal 3
 /tmp/train_controller -l
@@ -25,7 +28,7 @@
 # On other VMs - start GNS client first
 # Replace VM_x86_Target01 with the Central VM's Qnet node name
 gns -c VM_x86_Target01 &
-/tmp/local_intersection_controller -g
+/tmp/local_intersection_controller -g -i I1 -n traffic_local_I1
 /tmp/train_controller -g
 ```
 
@@ -45,18 +48,21 @@ gns -c VM_x86_Target01 &
 Build Central with `make -C central_controller all PLATFORM=x86_64` in a configured
 QNX SDP environment, then copy `central_controller/build/x86_64-debug/central_controller`
 to the QNX target. Run `make -C central_controller/tests all PLATFORM=x86_64` to build
-its test executables.
+its test executables. Run `make -C local_intersection_controller/tests run PLATFORM=x86_64`
+on QNX for the Local core timing/telemetry harness.
 
-Central uses the existing shared protocol. The merged Local now contains an I1
-state machine, traffic/time-of-day simulation, status/fault publication and
-mode/coordination handlers; Train publishes crossing state and accepts simulator
-requests. Central adds `sim-start I1`, `sim-stop I1` and `sim-time I1 07:00`, with
-the Local `SIM1` handler still required. For this demo, omit Central `--schedule`
-so Local's simulated clock controls time-of-day policy. A connected peer alone
-does not enable commands; the default maximum status age is five seconds,
-configurable with `-s 1..60`. Source review gaps and unverified real-peer behavior
-are recorded in the integration contract; historical fixture results are not
-validation of the updated Local.
+Central uses the existing shared protocol. The merged Local now has a runtime
+intersection ID (`-i I1..I6`) and service name (`-n service`), plus traffic
+simulation, time-of-day policy, status/fault publication and mode/coordination
+handlers. Local railway filtering maps P1 to I1/I2, P2 to I3/I4 and P3 to
+I5/I6; Train still must deliver events to every affected Local service in the
+final deployment. Central adds `sim-start I1`, `sim-stop I1` and
+`sim-time I1 07:00`, with the Local `SIM1` handler still required. For this
+demo, omit Central `--schedule` so Local's simulated clock controls time-of-day
+policy. A connected peer alone does not enable commands; the default maximum
+status age is five seconds, configurable with `-s 1..60`. Source review gaps and
+unverified real-peer behavior are recorded in the integration contract;
+historical fixture results are not validation of the updated Local.
 
 See [Central instructions](central_controller/README.md) and the
 [integration contract](central_controller/INTEGRATION.md) for test commands,

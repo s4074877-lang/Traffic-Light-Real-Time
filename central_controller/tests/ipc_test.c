@@ -393,6 +393,33 @@ static void test_compact_frames(void) {
                                      &normalized) &&
             memcmp(normalized.data, &status.payload, sizeof(status.payload)) == 0,
             "compact Local status preserves zero-based ID and timing");
+    status.payload.telemetry_version = STATUS_TELEMETRY_VERSION;
+    status.payload.status_sequence = 55;
+    status.payload.last_command_id = 66;
+    status.payload.sim_minute_of_day = 8 * 60 + 5;
+    status.payload.sensor_ns_count = 6;
+    status.payload.pedestrian_ew_request = 1;
+    status.payload.sim_running = 1;
+    status.payload.train_active = 1;
+    status.payload.fault_active = 1;
+    status.payload.fault_type = FAULT_GATE;
+    status.payload.fault_severity = SEV_CRITICAL;
+    require(central_frame_normalize(&status, sizeof(status), CONTROLLER_CENTRAL,
+                                     &normalized) &&
+            memcmp(normalized.data, &status.payload, sizeof(status.payload)) == 0,
+            "compact Local telemetry status preserves extended fields");
+    status.payload.sim_minute_of_day = 24 * 60;
+    require(!central_frame_normalize(&status, sizeof(status), CONTROLLER_CENTRAL,
+                                      &normalized), "invalid Local telemetry minute rejected");
+    status.payload.sim_minute_of_day = 8 * 60 + 5;
+    status.payload.pedestrian_ew_request = 2;
+    require(!central_frame_normalize(&status, sizeof(status), CONTROLLER_CENTRAL,
+                                      &normalized), "invalid Local telemetry boolean rejected");
+    status.payload.pedestrian_ew_request = 1;
+    status.payload.reserved = 1;
+    require(!central_frame_normalize(&status, sizeof(status), CONTROLLER_CENTRAL,
+                                      &normalized), "invalid Local telemetry reserved byte rejected");
+    status.payload.reserved = 0;
     status.payload.intersection_id = NUM_INTERSECTIONS;
     require(!central_frame_normalize(&status, sizeof(status), CONTROLLER_CENTRAL,
                                       &normalized), "invalid compact Local ID rejected");

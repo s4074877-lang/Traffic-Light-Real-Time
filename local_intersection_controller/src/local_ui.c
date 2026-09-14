@@ -97,8 +97,11 @@ void display_ui(void) {
     clear_screen();
 
     printf("%s========================================================%s\n", COLOR_BOLD, COLOR_RESET);
-    printf("%s                    LOCAL CONTROLLER%s\n", COLOR_BOLD, COLOR_RESET);
+    printf("%s                 LOCAL CONTROLLER I%u%s\n",
+           COLOR_BOLD, (unsigned)state.intersection_id + 1, COLOR_RESET);
     printf("%s========================================================%s\n", COLOR_BOLD, COLOR_RESET);
+    printf("Service [%s] mode [%s]\n",
+           state.service_name, connection_mode_str(state.mode));
 
     printf("Connected to central_controller [%s%s%s] last update [%s]\n",
            state.central_conn.connected ? COLOR_GREEN : COLOR_RED,
@@ -125,6 +128,11 @@ void display_ui(void) {
 
     printf("%s========================================================%s\n", COLOR_BOLD, COLOR_RESET);
     printf("Traffic mode [%s]\n", mode_text(display_mode()));
+    printf("Telemetry seq [%u] last command [%u] health [%s]\n",
+           (unsigned)state.status_sequence,
+           (unsigned)state.last_applied_command_id,
+           (!state.fault_active && state.traffic_mode != MODE_FAILSAFE) ?
+           "HEALTHY" : "DEGRADED");
 #if ENABLE_TRAFFIC_SIMULATION
     printf("Sim time [%s] period [%s]\n",
            sim_time, period_text(state.sim_seconds));

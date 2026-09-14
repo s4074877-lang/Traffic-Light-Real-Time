@@ -178,6 +178,20 @@ int main(void) {
     CHECK(!central_monitor_status(&monitor, &status, start));
     CHECK(memcmp(&before, &monitor, sizeof(monitor)) == 0);
     status.intersection_id = I1;
+    status.telemetry_version = STATUS_TELEMETRY_VERSION;
+    status.status_sequence = 77;
+    status.last_command_id = 88;
+    status.sim_minute_of_day = 9 * 60 + 15;
+    status.pedestrian_ns_request = 1;
+    status.sim_running = 1;
+    status.train_active = 1;
+    status.fault_active = 1;
+    status.fault_type = FAULT_GATE;
+    status.fault_severity = SEV_CRITICAL;
+    CHECK(central_monitor_status(&monitor, &status, start));
+    CHECK(monitor.intersections[I1].status.status_sequence == 77);
+    CHECK(monitor.intersections[I1].status.last_command_id == 88);
+    before = monitor;
 #define INVALID_STATUS(field, value) do { \
     status_msg_t invalid = status; \
     invalid.field = value; \
@@ -191,6 +205,20 @@ int main(void) {
     INVALID_STATUS(pedestrian_ns, 2);
     INVALID_STATUS(pedestrian_ew, 2);
     INVALID_STATUS(railway_preempt, 2);
+    INVALID_STATUS(telemetry_version, STATUS_TELEMETRY_VERSION + 1);
+    INVALID_STATUS(reserved, 1);
+    INVALID_STATUS(pedestrian_ns_request, 2);
+    INVALID_STATUS(pedestrian_ew_request, 2);
+    INVALID_STATUS(sim_running, 2);
+    INVALID_STATUS(train_pending, 2);
+    INVALID_STATUS(train_active, 2);
+    INVALID_STATUS(manual_mode_override, 2);
+    INVALID_STATUS(manual_sensor_override, 2);
+    INVALID_STATUS(coordination_pending, 2);
+    INVALID_STATUS(fault_active, 2);
+    INVALID_STATUS(fault_type, FAULT_NOT_WORKING + 1);
+    INVALID_STATUS(fault_severity, SEV_CRITICAL + 1);
+    INVALID_STATUS(sim_minute_of_day, 24 * 60);
 
     CHECK(central_peer_online(&monitor, CONTROLLER_LOCAL,
                               start + HEARTBEAT_MISS_LIMIT * CENTRAL_NSEC - 1));
