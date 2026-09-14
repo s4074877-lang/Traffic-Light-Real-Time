@@ -7,8 +7,8 @@
 
 // Connection mode
 typedef enum {
-    CONN_MODE_LOCAL = 0,   // Single VM - uses /dev/name/local/
-    CONN_MODE_GLOBAL = 1   // Multi VM - uses /dev/name/global/
+    CONN_MODE_LOCAL = 0,   // Single VM - uses /tmp/connection/ directly
+    CONN_MODE_GLOBAL = 1   // Multi VM - uses /net/<vm>/tmp/connection/ via Qnet
 } connection_mode_t;
 
 // Connection state structure
@@ -24,7 +24,8 @@ typedef struct {
 
 // Initialize connection structure
 // service_name: just the name (e.g., "traffic_local_controller")
-// mode: CONN_MODE_LOCAL or CONN_MODE_GLOBAL
+// mode: CONN_MODE_LOCAL  -> looks at /tmp/connection/<service>
+//       CONN_MODE_GLOBAL -> looks at /net/<vm>/tmp/connection/<service>
 void connection_init(connection_t *conn, const char *service_name,
                      connection_mode_t mode, pthread_mutex_t *mutex);
 
@@ -43,7 +44,8 @@ int connection_get_coid(connection_t *conn);
 
 // Register this controller with name service
 // service_name: just the name (e.g., "traffic_local_controller")
-// mode: CONN_MODE_LOCAL or CONN_MODE_GLOBAL
+// mode: CONN_MODE_LOCAL  -> registers at /tmp/connection/<service>
+//       CONN_MODE_GLOBAL -> registers at /tmp/connection/<service>, accessible via Qnet
 // Returns: name_attach_t pointer or NULL on failure
 name_attach_t* connection_register_service(const char *service_name, connection_mode_t mode);
 
@@ -51,6 +53,8 @@ name_attach_t* connection_register_service(const char *service_name, connection_
 void connection_unregister_service(name_attach_t *attach);
 
 // Parse command line for -l (local) or -g (global) flag
+// -l: All controllers on same VM, use /tmp/connection/
+// -g: Controllers on different VMs, use /net/<vm>/tmp/connection/ (default)
 // Returns: CONN_MODE_LOCAL or CONN_MODE_GLOBAL (default)
 connection_mode_t connection_parse_args(int argc, char *argv[]);
 

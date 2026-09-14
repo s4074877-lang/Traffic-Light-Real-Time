@@ -1,0 +1,39 @@
+TRAIN CONTROLLER COMMANDS
+=========================
+
+CONNECTION COMMANDS
+-------------------
+send-central    Send test message to Central
+send-local      Send test message to Local
+
+CROSSING SIMULATION
+-------------------
+train-up        Train W->E through P3->P2->P1
+train-down      Train E->W through P1->P2->P3
+train P# dir    Single train at crossing (e.g., train P1 up, train P2 down)
+
+FAULT INJECTION
+---------------
+p1-fault        Inject fault at P1
+p2-fault        Inject fault at P2
+p3-fault        Inject fault at P3
+reset P1        Reset fault at P1
+reset P2        Reset fault at P2
+reset P3        Reset fault at P3
+stuck P#        Make gate stuck (e.g., stuck P1)
+noexit P# dir   Train that never exits (e.g., noexit P1 up)
+
+TESTING
+-------
+test            Run all 7 requirement tests
+test N          Run single test (1-7)
+scale N         Set time scale (1-100, default 10)
+status          Show simulator status
+help            Show all simulator commands
+
+MENU NAVIGATION
+---------------
+1               View Status
+2               Send Command
+3               Exit
+q               Return to main menu (from command screen)

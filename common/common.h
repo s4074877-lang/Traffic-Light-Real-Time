@@ -20,6 +20,29 @@
 #define TRAIN_SERVICE_NAME      "traffic_train_controller"
 #define CENTRAL_SERVICE_NAME    "traffic_central_controller"
 
+// Qnet configuration - change VM names here for cross-VM communication
+// Set to NULL or empty string "" for local connections (same VM)
+#define CONNECTION_DIR          "/tmp/connection"
+#define LOCAL_VM_NAME           "vm1_local_intersection"      // VM running Local controller(s)
+#define TRAIN_VM_NAME           "vm2_train_controller"      // VM running Train controller
+#define CENTRAL_VM_NAME         "vm3_central_controller"      // VM running Central controller
+
+// Maximum service path length for Qnet paths
+#define MAX_SERVICE_PATH        256
+
+// Build Qnet service path: /net/{vm}/dev/name/global/{service} or just {service}
+static inline void build_qnet_path(char *path, size_t size, const char *vm_name,
+                                    const char *service, int global_mode) {
+    if (vm_name && *vm_name) {
+        // Remote VM via Qnet
+        snprintf(path, size, "/net/%s/dev/name/%s/%s", vm_name,
+                 global_mode ? "global" : "local", service);
+    } else {
+        // Local service (same VM)
+        snprintf(path, size, "%s", service);
+    }
+}
+
 // Timing
 #define UI_CHECK_INTERVAL    1  // seconds - check for UI updates
 #define HEARTBEAT_INTERVAL   1  // seconds - check connection alive

@@ -8,6 +8,7 @@
 #include <stdarg.h>
 #include <errno.h>
 #include <stdatomic.h>
+#include <sys/stat.h>
 
 #include "ipc.h"
 #include "commands.h"
@@ -991,6 +992,9 @@ int main(int argc, char *argv[]) {
     central_receiver_t receiver;
     central_ui_server_t ui_server = {0};
     const char *schedule_path = NULL;
+    const char *train_vm = TRAIN_VM_NAME;
+    const char *local_vm = LOCAL_VM_NAME;
+    char service_paths[MAX_PEERS][MAX_SERVICE_PATH];
     const char *services[MAX_PEERS] = {CENTRAL_LOCAL_SERVICE, CENTRAL_TRAIN_SERVICE};
     unsigned route[NUM_INTERSECTIONS] = {0}, configured[NUM_INTERSECTIONS] = {0}, peer_count = 2;
     pthread_condattr_t attributes;
@@ -1012,7 +1016,11 @@ int main(int argc, char *argv[]) {
         if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
             output("Usage: %s [-l|-g] [-o log-file] [-s status-age-seconds]\n"
                    "       [--headless] [--schedule file] [--local-endpoint I#=service]...\n"
-                   "Status age: 1..60 seconds, default %u; a supervisory freshness policy.\n",
+                   "       [--train-vm vm-name] [--local-vm vm-name]\n"
+                   "Status age: 1..60 seconds, default %u; a supervisory freshness policy.\n"
+                   "Qnet options:\n"
+                   "  --train-vm vm-name  Connect to Train controller on remote VM via /net/vm-name/\n"
+                   "  --local-vm vm-name  Connect to Local controller(s) on remote VM via /net/vm-name/\n",
                    argv[0], CENTRAL_STATUS_STALE_SEC);
             print_help();
             return EXIT_SUCCESS;
@@ -1044,6 +1052,8 @@ int main(int argc, char *argv[]) {
             if (peer == peer_count) services[peer_count++] = service;
             route[target] = peer; configured[target] = 1;
         }
+        else if (!strcmp(argv[i], "--train-vm") && i + 1 < argc) train_vm = argv[++i];
+        else if (!strcmp(argv[i], "--local-vm") && i + 1 < argc) local_vm = argv[++i];
         else if (!strcmp(argv[i], "-o") && i + 1 < argc) log_path = argv[++i];
         else if (!strcmp(argv[i], "-s") && i + 1 < argc) {
             char *end;
@@ -1058,6 +1068,24 @@ int main(int argc, char *argv[]) {
         }
         else { fprintf(stderr, "Unknown or incomplete option: %s\n", argv[i]); return EXIT_FAILURE; }
     }
+
+    // Create connection folder for Qnet
+    if (mkdir(CONNECTION_DIR, 0755) == -1 && errno != EEXIST) {
+        perror("Failed to create " CONNECTION_DIR);
+        return EXIT_FAILURE;
+    }
+
+    // Apply Qnet prefix to service paths if VM specified
+    int global_mode = (mode == CENTRAL_IPC_GLOBAL);
+    for (i = 0; i < (int)peer_count; ++i) {
+        const char *vm_name = (i == 1) ? train_vm : local_vm;
+        if (vm_name && *vm_name) {
+            build_qnet_path(service_paths[i], sizeof(service_paths[i]), vm_name, services[i], global_mode);
+            services[i] = service_paths[i];
+            fprintf(stderr, "Qnet service %d: %s\n", i, services[i]);
+        }
+    }
+
     if (schedule_path) {
         char error[256];
         if (!central_schedule_load(schedule_path, &daily_schedule, error, sizeof(error))) {
