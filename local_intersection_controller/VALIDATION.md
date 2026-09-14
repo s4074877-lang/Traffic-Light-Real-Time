@@ -17,6 +17,8 @@ directly without starting Central or Train:
 - status telemetry fits the existing `test_message_t.data` envelope and reports
   sequence, sensor counts, pedestrian requests, simulated time, train state,
   fault state and last accepted command ID;
+- the configured staggered startup profile matches I1 EW, I2 NS, I3 NS, I4 EW,
+  I5 EW and I6 NS, with per-intersection green timings inside protocol bounds;
 - Local heartbeat payload reports `sender_id`, `healthy` and a nonzero sequence;
 - runtime intersection matching accepts I1-I6 targets and railway filtering maps
   P1 to I1/I2, P2 to I3/I4 and P3 to I5/I6;

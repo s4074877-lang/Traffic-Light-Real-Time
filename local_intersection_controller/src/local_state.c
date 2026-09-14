@@ -172,6 +172,8 @@ uint16_t prepare_heartbeat_message_locked(test_message_t *msg) {
 
 void local_state_init(connection_mode_t mode, uint8_t intersection_id,
                       const char *service_name) {
+    const local_timing_config_t *config;
+    direction_t initial_direction;
     pthread_condattr_t status_cond_attr;
 #if ENABLE_TRAFFIC_SIMULATION
     srand((unsigned)time(NULL));
@@ -192,7 +194,11 @@ void local_state_init(connection_mode_t mode, uint8_t intersection_id,
     if (intersection_id >= NUM_INTERSECTIONS) {
         intersection_id = I1;
     }
+    config = local_config_for_intersection(intersection_id);
     state.intersection_id = intersection_id;
+    state.initial_phase = config->initial_phase;
+    state.ns_green_sec = config->ns_green_sec;
+    state.ew_green_sec = config->ew_green_sec;
     snprintf(state.service_name, sizeof(state.service_name), "%s",
              service_name != NULL ? service_name : LOCAL_SERVICE_NAME);
 #if ENABLE_TRAFFIC_SIMULATION
@@ -207,11 +213,18 @@ void local_state_init(connection_mode_t mode, uint8_t intersection_id,
 #else
     state.traffic_mode = MODE_FIXED;
 #endif
-    state.phase = PHASE_NS_GREEN;
-    state.phase_duration = GREEN_BASE_SEC;
-    state.time_remaining = GREEN_BASE_SEC;
-    state.ns_light = LIGHT_GREEN;
-    state.ew_light = LIGHT_RED;
+    state.phase = state.initial_phase;
+    initial_direction =
+        state.phase == PHASE_EW_GREEN ? DIR_EW : DIR_NS;
+    state.phase_duration = green_time_for_direction(initial_direction);
+    state.time_remaining = state.phase_duration;
+    if (state.phase == PHASE_EW_GREEN) {
+        state.ns_light = LIGHT_RED;
+        state.ew_light = LIGHT_GREEN;
+    } else {
+        state.ns_light = LIGHT_GREEN;
+        state.ew_light = LIGHT_RED;
+    }
     connection_init(&state.central_conn, CENTRAL_SERVICE_NAME, mode, &state.mutex);
     connection_init(&state.train_conn, TRAIN_SERVICE_NAME, mode, &state.mutex);
 }

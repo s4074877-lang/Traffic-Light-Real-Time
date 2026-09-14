@@ -32,6 +32,12 @@
 #endif
 
 typedef struct {
+    phase_t initial_phase;
+    int ns_green_sec;
+    int ew_green_sec;
+} local_timing_config_t;
+
+typedef struct {
     connection_t central_conn;
     connection_t train_conn;
     connection_mode_t mode;
@@ -46,10 +52,13 @@ typedef struct {
 
     traffic_light_mode traffic_mode;
     phase_t phase;
+    phase_t initial_phase;
     light_state_t ns_light;
     light_state_t ew_light;
     int time_remaining;
     int phase_duration;
+    int ns_green_sec;
+    int ew_green_sec;
 
     int sensor_ns_count;
     int sensor_ew_count;
@@ -131,6 +140,8 @@ int is_night_time(int seconds);
 int random_train_gap_seconds(void);
 int random_train_direction(void);
 int random_car_gap_seconds(void);
+const local_timing_config_t* local_config_for_intersection(uint8_t intersection_id);
+int local_fixed_cycle_seconds_locked(void);
 int green_time_for_direction(direction_t direction);
 int vehicle_signal_seconds_locked(direction_t direction);
 int pedestrian_signal_seconds_locked(direction_t direction);

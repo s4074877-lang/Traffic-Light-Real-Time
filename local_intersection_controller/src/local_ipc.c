@@ -223,7 +223,7 @@ static int handle_coordination_command(int rcvid, test_message_t *msg,
         command.command_id != 0 &&
         command.mode == MODE_FIXED &&
         command.reserved == 0 &&
-        command.cycle_offset_sec < 2 * (GREEN_BASE_SEC + YELLOW_SEC) &&
+        command.cycle_offset_sec < local_fixed_cycle_seconds_locked() &&
         (command.phase == PHASE_NS_GREEN || command.phase == PHASE_EW_GREEN)) {
         s->traffic_mode = MODE_FIXED;
         s->manual_mode_override = 1;

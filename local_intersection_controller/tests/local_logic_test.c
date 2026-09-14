@@ -26,9 +26,12 @@ static void reset_core(void) {
     state.central_conn.connected = 0;
     state.train_conn.connected = 0;
     state.traffic_mode = MODE_FIXED;
+    state.initial_phase = PHASE_NS_GREEN;
     state.phase = PHASE_NS_GREEN;
     state.phase_duration = GREEN_BASE_SEC;
     state.time_remaining = GREEN_BASE_SEC;
+    state.ns_green_sec = GREEN_BASE_SEC;
+    state.ew_green_sec = GREEN_BASE_SEC;
     state.ns_light = LIGHT_GREEN;
     state.ew_light = LIGHT_RED;
     state.sensor_ns_count = 0;
@@ -157,6 +160,59 @@ static void test_fixed_cycle_timing_without_central(void) {
     pthread_mutex_unlock(&state.mutex);
 }
 
+static void test_initial_profile_loaded(void) {
+    const local_timing_config_t *config = local_config_for_intersection(I1);
+
+    pthread_mutex_lock(&state.mutex);
+    CHECK(state.initial_phase == PHASE_EW_GREEN);
+    CHECK(state.phase == PHASE_EW_GREEN);
+    CHECK(state.ns_light == LIGHT_RED);
+    CHECK(state.ew_light == LIGHT_GREEN);
+    CHECK(state.phase_duration == config->ew_green_sec);
+    CHECK(state.time_remaining == config->ew_green_sec);
+    pthread_mutex_unlock(&state.mutex);
+}
+
+static void test_configured_intersection_profiles(void) {
+    static const phase_t expected_phase[NUM_INTERSECTIONS] = {
+        PHASE_EW_GREEN,
+        PHASE_NS_GREEN,
+        PHASE_NS_GREEN,
+        PHASE_EW_GREEN,
+        PHASE_EW_GREEN,
+        PHASE_NS_GREEN
+    };
+    unsigned i;
+
+    for (i = 0; i < NUM_INTERSECTIONS; ++i) {
+        const local_timing_config_t *config =
+            local_config_for_intersection((uint8_t)i);
+        CHECK(config->initial_phase == expected_phase[i]);
+        CHECK(config->ns_green_sec >= GREEN_MIN_SEC);
+        CHECK(config->ns_green_sec <= GREEN_MAX_SEC);
+        CHECK(config->ew_green_sec >= GREEN_MIN_SEC);
+        CHECK(config->ew_green_sec <= GREEN_MAX_SEC);
+    }
+}
+
+static void test_reset_uses_initial_profile(void) {
+    reset_core();
+    pthread_mutex_lock(&state.mutex);
+    state.initial_phase = PHASE_EW_GREEN;
+    state.ns_green_sec = 22;
+    state.ew_green_sec = 28;
+    state.phase = PHASE_NS_GREEN;
+    state.phase_duration = 22;
+    state.time_remaining = 7;
+    reset_demo_inputs_locked();
+    CHECK(state.phase == PHASE_EW_GREEN);
+    CHECK(state.ns_light == LIGHT_RED);
+    CHECK(state.ew_light == LIGHT_GREEN);
+    CHECK(state.phase_duration == 28);
+    CHECK(state.time_remaining == 28);
+    pthread_mutex_unlock(&state.mutex);
+}
+
 static void test_sensor_timing(void) {
     reset_core();
     pthread_mutex_lock(&state.mutex);
@@ -263,6 +319,9 @@ static void test_runtime_ids_and_railway_mapping(void) {
 
 int main(void) {
     local_state_init(CONN_MODE_LOCAL, I1, LOCAL_SERVICE_NAME);
+    test_initial_profile_loaded();
+    test_configured_intersection_profiles();
+    test_reset_uses_initial_profile();
     test_status_telemetry();
     test_typed_heartbeat_health();
     test_fixed_cycle_timing_without_central();
