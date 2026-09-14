@@ -20,7 +20,7 @@ Central-origin operator overrides are described by the assignment. The repositor
 | Train -> Central | `MSG_RAILWAY_STATUS` | Displays reported aggregate train state, gate state and fault for P1-P3. |
 | Central -> Local | `MSG_MODE_COMMAND` | Local now validates fixed/sensor/temp/revert and echoes the ID. Temporary-baseline/revert differences remain below. |
 | Central -> Local | `MSG_COORDINATION_COMMAND` | Local validates and requests the phase, but currently ignores the validated relative cycle offset; there is no shared activation epoch. |
-| Central -> Local | `MSG_TEST` | Central sends versioned `SIM1` simulation requests with target and command ID; Local's current generic test handler does not implement them. |
+| Central -> Local | `MSG_TEST` | Central sends versioned `SIM1` simulation requests with target and command ID; Local validates and applies them through its dedicated handler. |
 | Central -> Train | `MSG_TEST` | Carries an allowlisted simulator command in the existing string payload. Train implements this route despite the older shared-header comment that Central never sends to Train. |
 | Central -> Local/Train | `MSG_HEARTBEAT` | Compatibility contact probes, not proof of sensor or actuator health. |
 | Local -> Central | `MSG_OVERRIDE_REQUEST` | Declared in the shared header; application contract pending. |
@@ -131,7 +131,7 @@ SIM1 <target> <command_id> TIME <minute>
 
 `target` is the protocol intersection ID 0-5; `command_id` is 1-65535; `minute` is 0-1439. Use single spaces, uppercase verb and canonical decimal integers without signs or leading zeros (except `0`). For example, `sim-time I1 07:00` with assigned ID 42 sends `SIM1 0 42 TIME 420`. Central expands `all` into individual requests; there is no broadcast target inside this format.
 
-Local must validate the version, source/destination, exact syntax, allowed action, own target and value ranges before changing simulation state under its state mutex. Return the complete `reply_t` with `status=0` or `-1`, a terminated timestamp and the same command ID. Reject unsupported commands; do not execute arbitrary text. The legacy Local `MSG_TEST` handler only timestamps reception and ACKs ID zero. Central therefore records its reply to `SIM1` as `UNCONFIRMED`, never `ACCEPTED`, and does not replay automatically.
+Local validates the source/destination, exact syntax, allowed action, own target and value ranges before changing simulation state under its state mutex. It returns the complete `reply_t` with `status=0` or `-1`, a terminated timestamp and the parsed command ID. Unsupported or malformed commands are rejected without changing simulation state.
 
 Implement this IPC path independently of `ENABLE_DEMO_COMMANDS`; disabling the interactive demo console must not disable Central control. `ENABLE_TRAFFIC_SIMULATION` remains a build-time capability; the Local owner must add a runtime enabled state and explicit rejection when that capability is unavailable. On a capable build, repeated START/STOP should be idempotent. A valid ACK is acceptance, not a status report proving generation has started/stopped: v1 status has no simulation-enabled or simulation-time field. Confirm behavior on Local during integration before claiming the feature works end to end.
 
@@ -183,7 +183,7 @@ Retain Yellow and the present WALK mapping until the team confirms the intersect
 
 | Owner | Handoff or review |
 | --- | --- |
-| Local | Implement the proposed `SIM1` traffic-simulation handler above; resolve the review gaps above, then demonstrate phases, railway protection, status refresh and temporary expiry with Central offline. |
+| Local | Run the `SIM1` traffic-simulation handler through Central; resolve the review gaps above, then demonstrate phases, railway protection, status refresh and temporary expiry with Central offline. |
 | Train | Return simulator results/BUSY instead of unconditional success. Add train STOP, track and flash reports only via an agreed protocol change if required. |
 | Train | Move blocking outbound `MsgSend` work away from simulator/state-machine callbacks using a bounded handoff. Current callbacks can wait on Central/Local. |
 | Train | Fix the remote `p#-fault` self-deadlock caused by re-locking the same state mutex in a callback. Synchronize simulator state shared by tick, console and remote-command paths; Central's separate queue cannot repair internal races. |

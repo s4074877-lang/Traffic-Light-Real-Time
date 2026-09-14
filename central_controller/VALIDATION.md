@@ -5,9 +5,9 @@
 The merged Local source now includes I1 phases, traffic/time-of-day simulation,
 pedestrian/railway handling, status/fault envelopes and command-ID replies. This
 revision updates Central's simulation request path and documentation to match
-that ownership boundary. The proposed `SIM1` contract still needs its Local
-handler. Legacy generic `MSG_TEST` success with ID zero must not be reported as
-accepted simulation control.
+that ownership boundary. The Local now implements the proposed `SIM1` contract
+and echoes its command ID. Legacy generic `MSG_TEST` success with ID zero must
+not be reported as accepted simulation control.
 
 Current host checks used macOS Clang with
 `-std=c11 -Wall -Wextra -Werror -O2`:
@@ -39,9 +39,10 @@ Local state machine. Current pending checks are:
   updated `central_features_test` simulation/display scenarios on QNX.
 - Run Central without `--schedule` against the real I1 Local and verify status,
   mode-command IDs and display match Local.
-- Implement/test `SIM1` START/STOP/TIME on Local, including malformed/unsupported
-  requests, matching rejection IDs, idempotence, preserving manual overrides and
-  uninterrupted phases/pedestrian/railway handling when generation stops.
+- Run the real Central/Local integration for `SIM1` START/STOP/TIME, including
+  malformed/unsupported requests, matching rejection IDs, idempotence, preserving
+  manual overrides and uninterrupted phases/pedestrian/railway handling when
+  generation stops.
 - Resolve Local temporary replacement/revert baseline and coordination offset;
   demonstrate mode expiry while Central is disconnected.
 - Agree pedestrian NS/EW geometry, Yellow and the 10-second cap; exercise
