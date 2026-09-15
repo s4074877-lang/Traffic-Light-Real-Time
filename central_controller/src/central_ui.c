@@ -83,6 +83,15 @@ static const char *keyword_color(const char *start, const char *cursor, size_t *
     return NULL;
 }
 
+static const char *inline_key_color(const char *cursor, size_t *length) {
+    const char *end;
+    if (!cursor || cursor[0] != '[') return NULL;
+    end = strchr(cursor, ']');
+    if (!end || end - cursor < 2 || end - cursor > 3) return NULL;
+    *length = (size_t)(end - cursor + 1);
+    return cursor[1] == '0' ? UI_RED : UI_YELLOW;
+}
+
 static void render_line(const char *line, int color) {
     const char *cursor = line;
     if (color && (*line == '+' || (line[0] == '|' && line[1] == '-' && line[2] == '-'))) {
@@ -93,7 +102,8 @@ static void render_line(const char *line, int color) {
     }
     while (*cursor) {
         size_t length = 0;
-        const char *prefix = color ? keyword_color(line, cursor, &length) : NULL;
+        const char *prefix = color ? inline_key_color(cursor, &length) : NULL;
+        if (!prefix) prefix = color ? keyword_color(line, cursor, &length) : NULL;
         if (prefix && length) {
             fputs(prefix, stdout);
             fwrite(cursor, 1, length, stdout);
@@ -208,9 +218,9 @@ static void print_quick_menu(int color) {
     print_menu_border(color);
 
     print_menu_text("VIEW / MONITOR", color);
-    print_menu_text("[1] Live Dashboard             [2] Status Snapshot", color);
-    print_menu_text("[3] Recent Events              [4] Active Faults", color);
-    print_menu_text("[5] Command History", color);
+    print_menu_text("[L] Live Dashboard             [S] Status Snapshot", color);
+    print_menu_text("[E] Recent Events              [F] Active Faults", color);
+    print_menu_text("[C] Command History", color);
     print_menu_border(color);
 
     print_menu_text("TRAFFIC MODE  -  SELECT INTERSECTION", color);
@@ -250,11 +260,12 @@ static int translate_shortcut(const char *input, char *output, size_t size,
 
     *start_watch = *quit_ui = *show_menu = 0;
 
-    if (!strcmp(key, "1")) { *start_watch = 1; return 2; }
-    if (!strcmp(key, "2")) { snprintf(output, size, "status"); return 1; }
-    if (!strcmp(key, "3")) { snprintf(output, size, "events"); return 1; }
-    if (!strcmp(key, "4")) { snprintf(output, size, "faults"); return 1; }
-    if (!strcmp(key, "5")) { snprintf(output, size, "commands"); return 1; }
+    /* Presentation shortcuts. Numeric aliases remain accepted for compatibility. */
+    if (!strcmp(key, "L") || !strcmp(key, "1")) { *start_watch = 1; return 2; }
+    if (!strcmp(key, "S") || !strcmp(key, "2")) { snprintf(output, size, "status"); return 1; }
+    if (!strcmp(key, "E") || !strcmp(key, "3")) { snprintf(output, size, "events"); return 1; }
+    if (!strcmp(key, "F") || !strcmp(key, "4")) { snprintf(output, size, "faults"); return 1; }
+    if (!strcmp(key, "C") || !strcmp(key, "5")) { snprintf(output, size, "commands"); return 1; }
     if (!strcmp(key, "H")) { snprintf(output, size, "help"); return 1; }
     if (!strcmp(key, "M")) { *show_menu = 1; return 2; }
     if (!strcmp(key, "0") || !strcmp(key, "Q")) { *quit_ui = 1; return 2; }

@@ -1,4 +1,3 @@
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -85,7 +84,6 @@ typedef struct {
 } peer_context_t;
 
 static central_state_t state;
-static central_ipc_mode_t display_mode = CENTRAL_IPC_LOCAL;
 static volatile sig_atomic_t interrupted;
 static atomic_int shutdown_requested;
 /* Only the operator thread reads/writes this flag. */
@@ -403,7 +401,7 @@ static void display_ui(void) {
 
     ui_panel("CENTRAL CONTROL ROOM  |  LIVE SUPERVISORY DASHBOARD");
     ui_rowf("Node: VM3  | Mode: %-6s | System: ONLINE | View: %-9s | Build: %s",
-            display_mode == CENTRAL_IPC_GLOBAL ? "GLOBAL" : "LOCAL",
+            mode == CENTRAL_IPC_GLOBAL ? "GLOBAL" : "LOCAL",
             watching ? "LIVE VIEW" : "SNAPSHOT", CENTRAL_BUILD_VERSION);
     ui_rowf("Railway: %-8s | Local: %-12s | Train: %-12s | Refresh: 1.0s | Status limit: %.1fs",
             train_online ? "ACTIVE" : "STANDBY",
@@ -493,9 +491,10 @@ static void display_ui(void) {
     if (dropped) ui_rowf("Dropped log records: %u", dropped);
     if (log_failed) ui_rowf("EVENT LOG FAILED: new events are not being saved.");
 
-    ui_panel("CONTROLS  |  OPERATOR COMMANDS");
-    ui_rowf("status  live snapshot  |  watch  continuous refresh  |  help  full help");
-    ui_rowf("commands command history | faults active faults | events event feed | quit close display");
+    ui_panel("CONTROLS  |  QUICK KEYS");
+    ui_rowf("[L] LIVE DASHBOARD   [S] STATUS   [E] EVENTS   [F] FAULTS   [C] HISTORY");
+    ui_rowf("[M] MENU             [H] FULL HELP                     [0] QUIT DISPLAY");
+    ui_rowf("LIVE VIEW: press ENTER to stop refresh before using another shortcut.");
     ui_border();
 
     dashboard_rendering = 0;
@@ -1257,7 +1256,6 @@ int main(int argc, char *argv[]) {
         }
         else { fprintf(stderr, "Unknown or incomplete option: %s\n", argv[i]); return EXIT_FAILURE; }
     }
-    display_mode = mode;
     /* The Local launcher publishes one comm endpoint per intersection. */
     for (i = 1; i < NUM_INTERSECTIONS; ++i) {
         unsigned peer;
