@@ -372,9 +372,6 @@ static void print_help(void) {
            "coordinate-at sets a Central dispatch time; v1 has no shared activation epoch.\n");
 }
 
-/* IPC mode chosen in main(), shown in the dashboard header. */
-static central_ipc_mode_t ui_ipc_mode = CENTRAL_IPC_LOCAL;
-
 static void display_ui(void) {
     central_monitor_t view;
     char events[8][EVENT_TEXT_SIZE];
@@ -1260,6 +1257,7 @@ int main(int argc, char *argv[]) {
         }
         else { fprintf(stderr, "Unknown or incomplete option: %s\n", argv[i]); return EXIT_FAILURE; }
     }
+    display_mode = mode;
     /* The Local launcher publishes one comm endpoint per intersection. */
     for (i = 1; i < NUM_INTERSECTIONS; ++i) {
         unsigned peer;
