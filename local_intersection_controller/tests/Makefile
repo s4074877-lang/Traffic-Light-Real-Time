@@ -6,12 +6,10 @@ TARGET = $(OUTPUT_DIR)/local_logic_test
 INPUT_TARGET = $(OUTPUT_DIR)/local_input_test
 
 LOCAL_SOURCES = ../src/local_state.c \
-                ../src/local_config.c \
                 ../src/local_traffic.c \
                 ../src/local_pedestrian.c \
                 ../src/local_simulation.c \
                 ../src/local_commands.c \
-                ../src/local_ui_commands.c \
                 ../src/local_ipc.c
 
 HEADERS = ../src/local_controller.h \

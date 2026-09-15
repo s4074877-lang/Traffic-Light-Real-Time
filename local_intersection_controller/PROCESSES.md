@@ -22,7 +22,7 @@ The single-intersection screen keeps the original console layout: service and
 connections, received-message timestamps, timing, vehicle lights, pedestrians,
 sensors and train state. The all view uses six compact sections with the same
 headings, bracketed values and separator lines. Both display and interactive UI
-share `src/local_panels.c`. Only active WALK countdowns are shown; STOP and red
+share `src/local_ui.c`. Only active WALK countdowns are shown; STOP and red
 lamp future durations are not predicted across adaptive timing changes.
 The private core reply now includes UI metadata; restart all Local roles using
 the same rebuilt binary. The shared Central/Train wire protocol is unchanged.
@@ -152,18 +152,42 @@ Start with `local_intersection_controller.c` (arguments), then follow the role:
 | --- | --- |
 | local_core.c | Core event loop and bounded status history |
 | local_comm.c | Network forwarding, status and heartbeat reporting |
-| local_ui.c | Single/all-intersection display and console input |
-| local_console.c | Interactive UI event loop and selected-target commands |
-| local_ui_commands.c | Small view-command parser |
+| local_ui.c | Terminal layout, interactive view selection, display/input roles |
+| local_launcher.c | Start and stop the six core/comm pairs |
 | local_process.c / .h | Shared QNX IPC helpers and private message format |
-| local_commands.c | Small switch for demo inputs; no network or terminal I/O |
+| local_commands.c | Validate input, parse view commands and apply demo commands |
 | local_ipc.c | Validate and apply messages received by core |
 | local_traffic.c | Vehicle phase timing, cycle allocation and railway hold |
 | local_pedestrian.c | WALK/STOP window and button time transfer |
 | local_simulation.c | Simulated time, cars and demo resets |
-| local_state.c / local_controller.h | State, initialization and telemetry |
-| local_config.c | The six startup profiles |
+| local_state.c / local_controller.h | Six startup profiles, state, initialization and telemetry |
 
 The old `local_threads.c` and legacy in-core display path are removed. Only core
 initializes lamp state. Functions ending in `_locked` operate on that state;
 callers hold its mutex. Core also has exclusive ownership in its event loop.
+
+## Connection to the lectures
+
+- Lecture 3 and Lecture 4: structs hold state; mutex lock/unlock delimit critical
+  sections. The mutex is process-local, not a lock shared by all six controllers.
+  Other processes use message passing instead of accessing the core's state.
+- Lecture 4, bounded buffers: the fixed-size history in `local_core.c` retains
+  recent status events for the communication process. It is bounded, not a
+  guarantee that unlimited disconnection can be replayed without loss.
+- Lecture 6, pages 6-9: control, communication and user I/O have different work
+  and blocking behavior. Keep their process boundaries; combine related terminal
+  functions in one source file. Combining files does not combine runtime tasks.
+- Lecture 8, page 3: keep terminal/network waits out of state critical sections.
+  Send/reply timeouts prevent waiting indefinitely for an unavailable peer.
+- Lecture 9: periodic work and deadline analysis are different from writing a
+  timer loop. This code does not implement RM/EDF or prove schedulability.
+  Execution times, jitter and response times still need measurement on QNX.
+
+Suggested reading order: main arguments -> launcher -> core loop -> traffic and
+pedestrian rules -> commands -> IPC/comm -> UI. Start with the plain `if`, `switch`
+and loop logic; leave QNX service setup in `local_process.c` until the control
+flow is clear. `poll` and `termios` are terminal plumbing for live refresh while
+typing, not additional traffic-control algorithms.
+
+The consolidation preserves process roles, UI text, traffic timing and the shared
+Central/Train protocol. It removes four small source files, not safety checks.
