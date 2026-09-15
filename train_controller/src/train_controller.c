@@ -718,6 +718,12 @@ static void send_railway_status(const crossing_t *snapshot, int count)
         msg.payload.gate_state = cx->gate;
         msg.payload.fault = (cx->fault != CX_FAULT_NONE) ? FAULT_GATE : FAULT_NONE;
 
+        // Per-track states let Central draw the UP and DOWN trains separately.
+        // cx_track_state_t values match train_state_t (NONE/APPROACHING/AT/CLEAR).
+        msg.payload.track_states = 1;
+        msg.payload.up_state = (uint8_t)cx->track[CX_TRACK_UP];
+        msg.payload.down_state = (uint8_t)cx->track[CX_TRACK_DOWN];
+
         reply_t reply;
         if (send_message_timeout(&state.central_conn, &msg, sizeof(msg), &reply, SEND_TIMEOUT_MS) != 0)
         {

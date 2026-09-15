@@ -25,7 +25,7 @@
 #define DISTANCE_P1_P2_UNITS    3
 #endif
 #ifndef DISTANCE_P2_P3_UNITS
-#define DISTANCE_P2_P3_UNITS    1
+#define DISTANCE_P2_P3_UNITS    3
 #endif
 
 // Train length: seconds from the front entering a crossing until the tail

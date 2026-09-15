@@ -277,6 +277,10 @@ int main(void) {
     INVALID_RAILWAY(train_state, TRAIN_CLEAR + 1);
     INVALID_RAILWAY(gate_state, GATE_FAULT + 1);
     INVALID_RAILWAY(fault, FAULT_NOT_WORKING + 1);
+    INVALID_RAILWAY(track_states, 2);
+    INVALID_RAILWAY(up_state, TRAIN_CLEAR + 1);
+    INVALID_RAILWAY(down_state, TRAIN_CLEAR + 1);
+    INVALID_RAILWAY(reserved, 1);
 
     central_peer_disconnected(&monitor, CONTROLLER_TRAIN);
     CHECK(!central_peer_online(&monitor, CONTROLLER_TRAIN, start));

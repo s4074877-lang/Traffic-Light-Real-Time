@@ -112,7 +112,9 @@ int central_frame_valid(const test_message_t *message, size_t size,
             memcpy(&value, message->data, sizeof(value));
             return source == CONTROLLER_TRAIN && destination == CONTROLLER_CENTRAL &&
                 value.crossing_id < NUM_CROSSINGS && value.train_state <= TRAIN_CLEAR &&
-                value.gate_state <= GATE_FAULT && value.fault <= FAULT_NOT_WORKING;
+                value.gate_state <= GATE_FAULT && value.fault <= FAULT_NOT_WORKING &&
+                value.track_states <= 1 && value.up_state <= TRAIN_CLEAR &&
+                value.down_state <= TRAIN_CLEAR && value.reserved == 0;
         }
         case MSG_FAULT_ALERT: {
             fault_msg_t value;
@@ -182,6 +184,12 @@ int central_frame_normalize(const void *frame, size_t size,
                 expected = sizeof(railway_status_full_msg_t);
                 payload_size = sizeof(railway_status_msg_t);
                 payload_offset = offsetof(railway_status_full_msg_t, payload);
+                if (size == payload_offset + offsetof(railway_status_msg_t, track_states)) {
+                    // Older Train builds send only the first four payload bytes;
+                    // their per-track states stay zero (unknown).
+                    expected = size;
+                    payload_size = offsetof(railway_status_msg_t, track_states);
+                }
                 break;
             default:
                 return 0;

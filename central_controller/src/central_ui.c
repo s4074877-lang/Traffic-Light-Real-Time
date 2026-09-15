@@ -35,6 +35,7 @@ static uint64_t monotonic_ns(void) {
 #define UI_MAGENTA     "\033[1;35m"
 #define UI_CYAN        "\033[1;36m"
 #define UI_WHITE       "\033[1;37m"
+#define UI_ORANGE      "\033[1;38;5;208m"
 
 static int word_char(unsigned char c) {
     return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
@@ -160,11 +161,22 @@ static void render_line(const char *line, int color) {
             continue;
         }
 
-        if (color && (!strncmp(cursor, "[>>>]", 5) || !strncmp(cursor, "[<<<]", 5))) {
-            fputs(UI_MAGENTA, stdout);
-            fwrite(cursor, 1, 5, stdout);
+        /* Railway map DN lane label: "DN" in green, arrows in the default colour */
+        if (color && !strncmp(cursor, "DN >>>", 6)) {
+            fputs(UI_GREEN, stdout);
+            fwrite(cursor, 1, 2, stdout);
             fputs(UI_RESET, stdout);
-            cursor += 5;
+            fwrite(cursor + 2, 1, 4, stdout);
+            cursor += 6;
+            continue;
+        }
+
+        /* Railway map trains: UP <[<<<][<<<] and DN [>>>][>>>]> in orange */
+        if (color && (!strncmp(cursor, "<[<<<][<<<]", 11) || !strncmp(cursor, "[>>>][>>>]>", 11))) {
+            fputs(UI_ORANGE, stdout);
+            fwrite(cursor, 1, 11, stdout);
+            fputs(UI_RESET, stdout);
+            cursor += 11;
             continue;
         }
 

@@ -162,11 +162,16 @@ typedef enum { // Boom gate position
 } gate_state_t;
 
 // Railway status payload (for MSG_RAILWAY_STATUS, Railway -> Central)
+// Central also accepts the older 4-byte payload (without the track fields).
 typedef struct {
     uint8_t crossing_id;    // train_intersection_id
-    uint8_t train_state;    // train_state_t
+    uint8_t train_state;    // train_state_t, combined over both tracks
     uint8_t gate_state;     // gate_state_t
     uint8_t fault;          // fault_type_t (FAULT_NONE if OK)
+    uint8_t track_states;   // 1 = up_state/down_state are reported, 0 = unknown
+    uint8_t up_state;       // train_state_t on the UP track (P3 -> P2 -> P1)
+    uint8_t down_state;     // train_state_t on the DOWN track (P1 -> P2 -> P3)
+    uint8_t reserved;
 } railway_status_msg_t;
 
 

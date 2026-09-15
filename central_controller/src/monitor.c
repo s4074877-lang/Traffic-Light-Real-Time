@@ -105,7 +105,9 @@ int central_monitor_status(central_monitor_t *m, const status_msg_t *s, uint64_t
 int central_monitor_railway(central_monitor_t *m, const railway_status_msg_t *s, uint64_t now) {
     central_crossing_status_t *entry;
     if (s->crossing_id >= NUM_CROSSINGS || s->train_state > TRAIN_CLEAR ||
-        s->gate_state > GATE_FAULT || s->fault > FAULT_NOT_WORKING) return 0;
+        s->gate_state > GATE_FAULT || s->fault > FAULT_NOT_WORKING ||
+        s->track_states > 1 || s->up_state > TRAIN_CLEAR ||
+        s->down_state > TRAIN_CLEAR || s->reserved != 0) return 0;
     central_observe_peer(m, CONTROLLER_TRAIN, now);
     entry = &m->crossings[s->crossing_id];
     entry->valid = 1;

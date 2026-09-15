@@ -85,21 +85,6 @@ typedef struct {
 
 static central_state_t state;
 static central_ipc_mode_t display_mode = CENTRAL_IPC_LOCAL;
-/* Presentation-only schematic direction. Updated when Central sends train-up/down.
-   It never affects railway safety or shared protocol behaviour. */
-static int display_train_direction = 1; /* +1 => >>>, -1 => <<< */
-
-/* Presentation-only train animation.  The real Railway Controller still owns
-   train/crossing state.  This state only interpolates an ASCII sprite between
-   live railway updates so the operator map is easier to read. */
-typedef struct {
-    int latched;
-    int active;
-    int direction;
-    uint64_t started_ns;
-} map_train_animation_t;
-
-static map_train_animation_t map_train_animation;
 static volatile sig_atomic_t interrupted;
 static atomic_int shutdown_requested;
 /* Only the operator thread reads/writes this flag. */
@@ -246,6 +231,23 @@ static void ui_console_write(const char *text) {
         if (ui_lamp_label_triplet(cursor)) {
             ui_console_render_label_triplet(cursor);
             cursor += 7;
+            continue;
+        }
+        /* Railway map DN lane label: "DN" in green, arrows in the default colour */
+        if (!strncmp(cursor, "DN >>>", 6)) {
+            fputs(UI_GREEN, stdout);
+            fwrite(cursor, 1, 2, stdout);
+            fputs(UI_RESET, stdout);
+            fwrite(cursor + 2, 1, 4, stdout);
+            cursor += 6;
+            continue;
+        }
+        /* Railway map trains: UP <[<<<][<<<] and DN [>>>][>>>]> in orange */
+        if (!strncmp(cursor, "<[<<<][<<<]", 11) || !strncmp(cursor, "[>>>][>>>]>", 11)) {
+            fputs("\033[1;38;5;208m", stdout);
+            fwrite(cursor, 1, 11, stdout);
+            fputs(UI_RESET, stdout);
+            cursor += 11;
             continue;
         }
 
@@ -484,75 +486,71 @@ static const char *map_gate_state(unsigned state_value) {
     return state_value <= GATE_FAULT ? names[state_value] : "UNKNOWN";
 }
 
-static int map_train_event_active(const central_monitor_t *view) {
-    unsigned i;
-    if (!view) return 0;
-    for (i = 0; i < NUM_CROSSINGS; ++i) {
-        if (!view->crossings[i].valid) continue;
-        if (view->crossings[i].status.train_state == TRAIN_APPROACHING ||
-            view->crossings[i].status.train_state == TRAIN_AT_CROSSING)
-            return 1;
+/* Railway lanes on the live map. Nothing is animated: each lane shows only
+   what Train reports for that track. The dotted lanes span row columns
+   MAP_TRACK_FIRST..MAP_TRACK_LAST and P1..P3 sit at map_crossing_col. */
+enum { MAP_TRACK_FIRST = 8, MAP_TRACK_LAST = 95, MAP_TRAIN_WIDTH = 11 };
+static const unsigned map_crossing_col[NUM_CROSSINGS] = {21, 48, 75}; /* the 'P' of P1..P3 */
+
+/* Crossing index each lane's train was last reported AT (UP, DN), or -1.
+   Written only while rendering the map. */
+static int map_lane_last_at[2] = {-1, -1};
+
+/* Build one lane row. UP trains run right-to-left P3->P2->P1 and DN trains
+   left-to-right P1->P2->P3. The rear-most crossing on the route that reports
+   the lane's train APPROACHING or AT CROSSING decides where it is drawn:
+   just before that crossing, or on it. After the train leaves a crossing it
+   waits between that crossing and the next until the next one reports; after
+   the last crossing on the route, or while Train is not reporting, the lane
+   is empty. */
+static void map_train_lane(char *row, size_t size, const central_monitor_t *view, int down) {
+    static const char up_sprite[MAP_TRAIN_WIDTH + 1] = "<[<<<][<<<]";
+    static const char down_sprite[MAP_TRAIN_WIDTH + 1] = "[>>>][>>>]>";
+    const char *sprite = down ? down_sprite : up_sprite;
+    int *last_at = &map_lane_last_at[down ? 1 : 0];
+    unsigned step;
+
+    if (!row || size < UI_INNER_WIDTH + 1 || !view) return;
+    memset(row, ' ', UI_INNER_WIDTH);
+    row[UI_INNER_WIDTH] = '\0';
+    memset(row + MAP_TRACK_FIRST, '.', MAP_TRACK_LAST - MAP_TRACK_FIRST + 1);
+    if (down) memcpy(row, "DN >>>", 6);
+    else memcpy(row + UI_INNER_WIDTH - 6, "<<< UP", 6);
+
+    for (step = 0; step < NUM_CROSSINGS; ++step) {
+        const central_crossing_status_t *entry = &view->crossings[step];
+        if (!entry->valid || !entry->synchronized || !entry->status.track_states) {
+            *last_at = -1; /* Train not reporting: forget the waiting train */
+            return;
+        }
     }
-    return 0;
-}
 
-static void map_train_tracks(char *up_track, char *down_track, size_t size,
-                             const central_monitor_t *view, uint64_t now) {
-    enum { WIDTH = 76 };
-    static const char right_sprite[] = "[>>>][>>>]";
-    static const char left_sprite[]  = "[<<<][<<<]";
-    const uint64_t animation_ns = 12000000000ULL; /* 12 s presentation transit */
-    const size_t sprite_width = sizeof(right_sprite) - 1;
-    uint64_t elapsed;
-    size_t max_start, start;
-    char *track;
-    const char *sprite;
-    int railway_active;
-
-    if (!up_track || !down_track || size < WIDTH + 1 || !view) return;
-    memset(up_track, '.', WIDTH);
-    memset(down_track, '.', WIDTH);
-    up_track[WIDTH] = '\0';
-    down_track[WIDTH] = '\0';
-
-    railway_active = map_train_event_active(view);
-
-    /* A new Railway APPROACHING/AT_CROSSING episode starts one visual transit.
-       We latch it so a stale APPROACHING message cannot restart the animation
-       every refresh.  A later NONE/CLEAR episode rearms the next train. */
-    if (!railway_active) {
-        map_train_animation.latched = 0;
-        map_train_animation.active = 0;
+    for (step = 0; step < NUM_CROSSINGS; ++step) {
+        unsigned i = down ? step : NUM_CROSSINGS - 1 - step;
+        const central_crossing_status_t *entry = &view->crossings[i];
+        unsigned lane, col, start;
+        lane = down ? entry->status.down_state : entry->status.up_state;
+        if (lane != TRAIN_APPROACHING && lane != TRAIN_AT_CROSSING) continue;
+        col = map_crossing_col[i];
+        if (lane == TRAIN_AT_CROSSING) *last_at = (int)i;
+        if (down) /* head '>' is the sprite's last character */
+            start = (lane == TRAIN_AT_CROSSING ? col + 1 : col - 3) - (MAP_TRAIN_WIDTH - 1);
+        else      /* head '<' is the sprite's first character */
+            start = lane == TRAIN_AT_CROSSING ? col : col + 3;
+        memcpy(row + start, sprite, MAP_TRAIN_WIDTH);
         return;
     }
 
-    if (!map_train_animation.latched) {
-        map_train_animation.latched = 1;
-        map_train_animation.active = 1;
-        map_train_animation.direction = display_train_direction >= 0 ? 1 : -1;
-        map_train_animation.started_ns = now;
+    /* No crossing reports the train: wait between the crossing it left and the next */
+    if (*last_at >= 0) {
+        int next = down ? *last_at + 1 : *last_at - 1;
+        if (next < 0 || next >= NUM_CROSSINGS) {
+            *last_at = -1; /* Left the last crossing on the route */
+            return;
+        }
+        memcpy(row + (map_crossing_col[*last_at] + map_crossing_col[next]) / 2 - MAP_TRAIN_WIDTH / 2,
+               sprite, MAP_TRAIN_WIDTH);
     }
-
-    if (!map_train_animation.active) return;
-    elapsed = now >= map_train_animation.started_ns ? now - map_train_animation.started_ns : 0;
-    if (elapsed >= animation_ns) {
-        map_train_animation.active = 0;
-        return;
-    }
-
-    max_start = WIDTH - sprite_width;
-    start = (size_t)((elapsed * (uint64_t)max_start) / animation_ns);
-    if (start > max_start) start = max_start;
-
-    if (map_train_animation.direction >= 0) {
-        track = up_track;
-        sprite = right_sprite;
-    } else {
-        track = down_track;
-        sprite = left_sprite;
-        start = max_start - start;
-    }
-    memcpy(track + start, sprite, sprite_width);
 }
 
 static void display_map(void) {
@@ -562,7 +560,7 @@ static void display_map(void) {
     char ns[NUM_INTERSECTIONS][16], ew[NUM_INTERSECTIONS][16];
     char ns_label[NUM_INTERSECTIONS][8], ew_label[NUM_INTERSECTIONS][8];
     const char *ped_ns[NUM_INTERSECTIONS], *ped_ew[NUM_INTERSECTIONS];
-    char train_up[77], train_down[77];
+    char train_up[UI_INNER_WIDTH + 1], train_down[UI_INNER_WIDTH + 1];
     unsigned i;
 
     pthread_mutex_lock(&state.mutex);
@@ -593,11 +591,12 @@ static void display_map(void) {
                                       (unsigned)status->pedestrian_ew_request);
         }
     }
-    map_train_tracks(train_up, train_down, sizeof(train_up), &view, now);
+    map_train_lane(train_up, sizeof(train_up), &view, 0);
+    map_train_lane(train_down, sizeof(train_down), &view, 1);
 
     dashboard_rendering = 1;
     ui_panel("LIVE TRAFFIC MAP  |  SCHEMATIC VIEW - I1..I6 / P1..P3");
-    ui_rowf("Lamp shape stays {o}; active bulb + R/Y/G label use color only | two-way railway animation is UI-only");
+    ui_rowf("Lamp shape stays {o}; active bulb + R/Y/G label use color only | railway lanes show Train-reported state");
     ui_rowf("");
     ui_rowf("%24s%27s%27s", "I1", "I3", "I5");
     ui_rowf("            +--------------------+     +--------------------+     +--------------------+");
@@ -610,10 +609,10 @@ static void display_map(void) {
     ui_rowf("            | PED E-W %-6s     |     | PED E-W %-6s     |     | PED E-W %-6s     |", ped_ew[0], ped_ew[2], ped_ew[4]);
     ui_rowf("            +---------+----------+     +---------+----------+     +---------+----------+");
     ui_rowf("                      |                          |                          |");
-    ui_rowf("            =========P1=========================P2=========================P3===========");
-    ui_rowf("            UP >>> %s", train_up);
-    ui_rowf("            DN <<< %s", train_down);
-    ui_rowf("            ============================================================================");
+    ui_rowf("        =============P1=========================P2=========================P3===================");
+    ui_rowf("%s", train_up);
+    ui_rowf("%s", train_down);
+    ui_rowf("        ========================================================================================");
     ui_rowf("                      |                          |                          |");
     ui_rowf("            +---------+----------+     +---------+----------+     +---------+----------+");
     ui_rowf("            | N-S %-9s      |     | N-S %-9s      |     | N-S %-9s      |", ns[1], ns[3], ns[5]);
@@ -642,14 +641,13 @@ static void display_map(void) {
     }
 
     ui_panel("SYSTEM STATUS  |  DISTRIBUTED HEALTH");
-    ui_rowf("LOCAL %-12s | TRAIN %-12s | SYSTEM %-10s | TRAIN DIRECTION %s",
+    ui_rowf("LOCAL %-12s | TRAIN %-12s | SYSTEM %-10s",
             ui_connection(&view.peers[0], local_online),
             ui_connection(&view.peers[1], train_online),
-            local_online && train_online ? "HEALTHY" : "DEGRADED",
-            display_train_direction >= 0 ? ">>>" : "<<<");
+            local_online && train_online ? "HEALTHY" : "DEGRADED");
 
     ui_panel("LIVE CONTROLS  |  TYPE COMMAND THEN ENTER - MAP CONTINUES");
-    ui_rowf("[F1-F6] FIXED | [S1-S6] SENSOR | [TU] TRAIN >>> | [TD] TRAIN <<< | [E] EVENTS | [D] DETAILS");
+    ui_rowf("[F1-F6] FIXED | [S1-S6] SENSOR | [TU] TRAIN UP | [TD] TRAIN DN | [TB] BOTH | [E] EVENTS | [D] DETAILS");
     ui_rowf("[M] MENU | [H] HELP | [0] QUIT DISPLAY | blank ENTER pauses live refresh");
     ui_border();
     dashboard_rendering = 0;
@@ -1405,12 +1403,6 @@ static void execute_command(char *line) {
             central_message_init(&message, MSG_TEST, CONTROLLER_CENTRAL, CONTROLLER_TRAIN);
             memcpy(message.data, payload, sizeof(payload));
             command_result = enqueue_command(&message, 0, 0, 0);
-            if (command_result == 0) {
-                if (!strcmp(payload, "train-up") || strstr(payload, " up"))
-                    display_train_direction = 1;
-                else if (!strcmp(payload, "train-down") || strstr(payload, " down"))
-                    display_train_direction = -1;
-            }
         }
     }
     else if (!strncmp(line, "coordinate-at ", 14)) {

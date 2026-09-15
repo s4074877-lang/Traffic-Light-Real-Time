@@ -42,6 +42,7 @@ Central accepts these incoming forms after validating exact length, route, field
 | Original full `test_message_t` envelope | Protocol enum IDs: I1=0 through I6=5; P1=0 through P3=2. |
 | `status_full_msg_t` / `heartbeat_full_msg_t` | Protocol enum IDs. Compact framing does not change Local or heartbeat IDs. |
 | Train `railway_status_full_msg_t` / `fault_full_msg_t` | Current Train sends crossing-object IDs 1 through 3. Central converts these exact compact Train frames to P1=0 through P3=2 internally. |
+| Railway status track fields | `track_states=1` with `up_state`/`down_state` (train_state_t per track) drive the UP and DN lanes on the live map. Central still accepts the older 4-byte payload; those crossings show no train on the map. Railway PREEMPT/CLEAR to Local is unchanged. |
 | Local `fault_full_msg_t` | Protocol intersection enum IDs, unchanged. |
 
 The adapter selects a dialect using message type, source and exact structure size. It does not guess whether an overlapping ID such as `1` means P1 or P2. An envelope crossing ID `1` still means P2. A future Train compact producer must not switch to zero-based IDs without updating this agreement. This compatibility rule does not alter the shared header.

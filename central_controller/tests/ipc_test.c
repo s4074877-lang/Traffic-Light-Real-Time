@@ -285,6 +285,30 @@ static void test_compact_frames(void) {
                 memcmp(&envelope, &normalized, sizeof(envelope)) == 0,
                 "legacy zero-based crossing envelope preserved byte for byte");
     }
+    {
+        /* Older Train builds send the 4-byte payload without per-track states */
+        size_t legacy_size = sizeof(railway) - sizeof(railway.payload) + 4;
+        railway_status_msg_t decoded;
+        railway.payload.crossing_id = 3;
+        require(central_frame_normalize(&railway, legacy_size, CONTROLLER_CENTRAL, &normalized),
+                "compact Train status without track states accepted");
+        memcpy(&decoded, normalized.data, sizeof(decoded));
+        require(decoded.crossing_id == P3 && decoded.track_states == 0 &&
+                decoded.up_state == TRAIN_NONE && decoded.down_state == TRAIN_NONE,
+                "short compact status reports unknown track states");
+        railway.payload.track_states = 1;
+        railway.payload.up_state = TRAIN_AT_CROSSING;
+        railway.payload.down_state = TRAIN_APPROACHING;
+        require(central_frame_normalize(&railway, sizeof(railway), CONTROLLER_CENTRAL, &normalized),
+                "compact Train status with track states accepted");
+        memcpy(&decoded, normalized.data, sizeof(decoded));
+        require(decoded.track_states == 1 && decoded.up_state == TRAIN_AT_CROSSING &&
+                decoded.down_state == TRAIN_APPROACHING, "track states preserved");
+        railway.payload.down_state = TRAIN_CLEAR + 1;
+        require(!central_frame_normalize(&railway, sizeof(railway), CONTROLLER_CENTRAL, &normalized),
+                "invalid track state rejected");
+        railway.payload.track_states = railway.payload.up_state = railway.payload.down_state = 0;
+    }
     railway.payload.crossing_id = 1;
     memcpy(envelope.data, &railway.payload, sizeof(railway.payload));
     require(central_frame_normalize(&railway, sizeof(railway), CONTROLLER_CENTRAL,
