@@ -22,7 +22,36 @@ static const char *traffic_mode(unsigned mode) {
 }
 
 static const char *link_name(int connected) {
-    return connected ? "\033[32mCONNECTED\033[0m" : "\033[31mDISCONNECTED\033[0m";
+    return connected ? COLOR_GREEN "CONNECTED" COLOR_RESET :
+                       COLOR_RED "DISCONNECTED" COLOR_RESET;
+}
+
+static const char *lamp_color(unsigned lamp) {
+    if (lamp == LIGHT_GREEN) return COLOR_GREEN;
+    if (lamp == LIGHT_YELLOW) return COLOR_YELLOW;
+    if (lamp == LIGHT_RED) return COLOR_RED;
+    return COLOR_RESET;
+}
+
+static void print_vehicle(const status_msg_t *s, direction_t direction, int width) {
+    unsigned lamp = direction == DIR_NS ? s->ns_state : s->ew_state;
+    int seconds = local_vehicle_seconds(s, direction);
+    char value[20];
+    if (seconds < 0) snprintf(value, sizeof(value), "%s --", lamp_name(lamp));
+    else snprintf(value, sizeof(value), "%s %ds", lamp_name(lamp), seconds);
+    printf("%s%s%s", lamp_color(lamp), value, COLOR_RESET);
+    if (width > (int)strlen(value))
+        printf("%*s", width - (int)strlen(value), "");
+}
+
+static void print_pedestrian_state(int walk) {
+    printf("%s%s%s", walk ? COLOR_GREEN : COLOR_RED,
+           walk ? "WALK" : "STOP", COLOR_RESET);
+}
+
+static void print_health(int fault) {
+    printf("%s%s%s", fault ? COLOR_RED : COLOR_GREEN,
+           fault ? "FAULT" : "OK", COLOR_RESET);
 }
 
 static void local_print_heading(int selected) {
@@ -31,36 +60,33 @@ static void local_print_heading(int selected) {
     else printf("                    LOCAL CONTROLLER I%d\n", selected + 1);
     puts(divider);
     if (selected == INTERSECTION_ALL) {
-        puts("ID MODE     NS          EW          PED N/E CARS N/E HEALTH");
+        printf("%-3s%-9s%-12s%-12s%-8s%-9s%s\n",
+               "ID", "MODE", "NS", "EW", "PED N/E", "CARS N/E", "HEALTH");
         puts(divider);
     }
 }
 
-static void vehicle_text(const status_msg_t *s, direction_t direction,
-                         char *text, size_t size) {
-    unsigned lamp = direction == DIR_NS ? s->ns_state : s->ew_state;
-    int seconds = local_vehicle_seconds(s, direction);
-    if (seconds < 0) snprintf(text, size, "%s --", lamp_name(lamp));
-    else snprintf(text, size, "%s %ds", lamp_name(lamp), seconds);
-}
-
 static void print_pedestrian(const char *direction, int walk, int request, unsigned remaining) {
-    printf("  %s [%s", direction, walk ? "WALK" : "STOP");
+    printf("  %s [", direction);
+    print_pedestrian_state(walk);
     if (walk && remaining > PED_WALK_END_SEC)
         printf(" %u sec", remaining - PED_WALK_END_SEC);
-    printf("] request [%s]\n", request ? "PENDING" : "NONE");
+    printf("] request [%s%s%s]\n", request ? COLOR_YELLOW : COLOR_RESET,
+           request ? "PENDING" : "NONE", COLOR_RESET);
 }
 
 static void local_print_panel(const core_reply_t *reply, int compact) {
     const status_msg_t *s = &reply->status;
-    char ns[20], ew[20];
-    vehicle_text(s, DIR_NS, ns, sizeof(ns));
-    vehicle_text(s, DIR_EW, ew, sizeof(ew));
     if (compact) {
-        printf("I%u %-8s %-11s %-11s %s/%s     %2u/%-2u    %s\n",
-               s->intersection_id + 1, traffic_mode(s->mode), ns, ew,
-               s->pedestrian_ns ? "W" : "S", s->pedestrian_ew ? "W" : "S",
-               s->sensor_ns_count, s->sensor_ew_count, s->fault_active ? "FAULT" : "OK");
+        printf("I%u %-8s ", s->intersection_id + 1, traffic_mode(s->mode));
+        print_vehicle(s, DIR_NS, 12);
+        print_vehicle(s, DIR_EW, 12);
+        printf("%s%s%s/%s%s%s     %-2u/%-2u    ",
+               s->pedestrian_ns ? COLOR_GREEN : COLOR_RED, s->pedestrian_ns ? "W" : "S", COLOR_RESET,
+               s->pedestrian_ew ? COLOR_GREEN : COLOR_RED, s->pedestrian_ew ? "W" : "S", COLOR_RESET,
+               s->sensor_ns_count, s->sensor_ew_count);
+        print_health(s->fault_active);
+        putchar('\n');
     } else {
         printf("Service [%s] mode [%s]\n", reply->service_name, reply->global_mode ? "GLOBAL" : "LOCAL");
         printf("Connected to central_controller [%s]\n", link_name(reply->central_connected));
@@ -71,19 +97,24 @@ static void local_print_panel(const core_reply_t *reply, int compact) {
         puts(divider);
         printf("Traffic mode [%s]\nPhase [%s] remaining [%u sec]\n",
                traffic_mode(s->mode), phase_name(s->phase), s->time_remaining);
-        printf("Telemetry seq [%u] last command [%u] health [%s]\n",
-               s->status_sequence, s->last_command_id, s->fault_active ? "FAULT" : "HEALTHY");
+        printf("Telemetry seq [%u] last command [%u] health [", s->status_sequence,
+               s->last_command_id);
+        print_health(s->fault_active);
+        puts("]");
         printf("Sim time [%02d:%02d:%02d]\n", reply->sim_seconds / 3600,
                reply->sim_seconds / 60 % 60, reply->sim_seconds % 60);
         puts("Vehicle lights:");
-        printf("  NS [%s]\n  EW [%s]\n", ns, ew);
+        printf("  NS ["); print_vehicle(s, DIR_NS, 0); puts("]");
+        printf("  EW ["); print_vehicle(s, DIR_EW, 0); puts("]");
         puts("Pedestrian:");
         print_pedestrian("NS", s->pedestrian_ns, s->pedestrian_ns_request, s->time_remaining);
         print_pedestrian("EW", s->pedestrian_ew, s->pedestrian_ew_request, s->time_remaining);
         printf("Sensors:\n  NS cars [%u]\n  EW cars [%u]\n", s->sensor_ns_count, s->sensor_ew_count);
-        printf("Train: %s\n", s->train_active ? "active" : s->train_pending ? "pending" :
-               s->railway_preempt ? "recovery" : "none active");
-        if (s->fault_active) printf("Fault type [%u] severity [%u]\n", s->fault_type, s->fault_severity);
+        printf("Train: %s%s%s\n", s->train_active ? COLOR_RED :
+               (s->train_pending || s->railway_preempt) ? COLOR_YELLOW : COLOR_GREEN,
+               s->train_active ? "active" : s->train_pending ? "pending" :
+               s->railway_preempt ? "recovery" : "none active", COLOR_RESET);
+        if (s->fault_active) printf(COLOR_RED "Fault type [%u] severity [%u]" COLOR_RESET "\n", s->fault_type, s->fault_severity);
     }
     if (!compact) puts(divider);
 }
@@ -128,7 +159,7 @@ static void draw_console(const console_t *ui) {
     for (i = 0; i < NUM_INTERSECTIONS; ++i) {
         if (ui->selected != INTERSECTION_ALL && ui->selected != i) continue;
         if (ui->online[i]) local_print_panel(&ui->snapshots[i], ui->selected == INTERSECTION_ALL);
-        else printf("I%d [OFFLINE] No current state available.\n", i + 1);
+        else printf("I%d [" COLOR_RED "OFFLINE" COLOR_RESET "] No current state available.\n", i + 1);
     }
     if (ui->selected == INTERSECTION_ALL) {
         puts(divider);
@@ -293,9 +324,9 @@ int run_display(const char *core_name, int display_all) {
             if (online[i]) {
                 local_print_panel(&replies[i], display_all);
             } else if (display_all) {
-                printf("I%d  OFFLINE  --     --       --  --     --     --    --     --\n", i + 1);
+                printf("I%d [" COLOR_RED "OFFLINE" COLOR_RESET "] No current state available.\n", i + 1);
             } else {
-                printf("%s: OFFLINE; no current lamp state\n", names[i]);
+                printf("%s: " COLOR_RED "OFFLINE" COLOR_RESET "; no current lamp state\n", names[i]);
             }
         }
         fflush(stdout);
