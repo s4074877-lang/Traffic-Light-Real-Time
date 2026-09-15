@@ -179,6 +179,23 @@ static double age_seconds(uint64_t now, uint64_t received) {
     return now >= received ? (double)(now - received) / CENTRAL_NSEC : 0.0;
 }
 
+static void ui_panel(const char *title) {
+    output("+----------------------------------------------------------------------------+\n");
+    output("| %-74s |\n", title);
+    output("+----------------------------------------------------------------------------+\n");
+}
+
+static const char *ui_connection(const central_peer_status_t *peer, int online) {
+    if (!peer->connected) return "DISCONNECTED";
+    return online ? "CONNECTED" : "LOST";
+}
+
+static const char *ui_health(const central_monitor_t *monitor, controller_type_t source,
+                             unsigned id) {
+    int health = central_monitor_health(monitor, source, id);
+    return health > 0 ? "HEALTHY" : health == 0 ? "DEGRADED" : "UNKNOWN";
+}
+
 static void event_locked(central_state_t *s, const char *format, ...) {
     char text[EVENT_TEXT_SIZE] = {0};
     char timestamp[32];
@@ -252,36 +269,47 @@ static void display_ui(void) {
     pthread_mutex_unlock(&state.mutex);
     now = central_monotonic_ns();
     if (!output_buffer && watching && isatty(STDOUT_FILENO)) output("\033[2J\033[H");
-    output("========================= CENTRAL CONTROLLER =========================\n");
-    output("Build %s (%s)\n", CENTRAL_BUILD_VERSION, CENTRAL_BUILD_STAMP);
-    for (i = 0; i < 2; ++i) {
-        controller_type_t source = i ? CONTROLLER_TRAIN : CONTROLLER_LOCAL;
-        output("%-6s link %-12s contact %s\n", controller_name(source),
-               view.peers[i].connected ? "CONNECTED" : "DISCONNECTED",
-               central_peer_online(&view, source, now) ? "ONLINE" : "OFFLINE");
-    }
-    output("\nID  Mode      Phase       NS      EW      Ped NS/EW  Railway Remain Age    State\n");
+    ui_panel("CENTRAL CONTROL ROOM  |  LIVE SUPERVISORY DASHBOARD");
+    output("| Node: VM3  | Mode: %-6s | System: %-11s | Build: %-10s | %-9s |\n",
+           mode == CENTRAL_IPC_GLOBAL ? "GLOBAL" : "LOCAL",
+           "ONLINE", CENTRAL_BUILD_VERSION,
+           watching ? "LIVE VIEW" : "SNAPSHOT");
+    output("| Railway: %-8s | Local: %-12s | Train: %-12s | Refresh: 1.0s       |\n",
+           central_peer_online(&view, CONTROLLER_TRAIN, now) ? "ACTIVE" : "STANDBY",
+           ui_connection(&view.peers[0], central_peer_online(&view, CONTROLLER_LOCAL, now)),
+           ui_connection(&view.peers[1], central_peer_online(&view, CONTROLLER_TRAIN, now)));
+    output("| Status age limit: %4.1fs  | Central process: OPERATIONAL                 |\n",
+           (double)central_monitor_status_max_age_ns(&view) / CENTRAL_NSEC);
+    output("+----------------------------------------------------------------------------+\n");
+
+    ui_panel("INTERSECTIONS  |  SIGNALS / SENSORS / RAILWAY PRE-EMPTION");
+    output("| ID | MODE     | PHASE        | NS       | EW       | PED NS/EW | RAIL     |\n");
+    output("|----+----------+--------------+----------+----------+-----------+----------|\n");
     for (i = 0; i < NUM_INTERSECTIONS; ++i) {
         const central_intersection_status_t *entry = &view.intersections[i];
         const status_msg_t *status = &entry->status;
         const char *freshness;
-        if (!entry->valid) { output("I%u  Waiting for status\n", i + 1); continue; }
+        const char *health = ui_health(&view, CONTROLLER_LOCAL, i);
+        if (!entry->valid) {
+            output("| I%u | %-8s | %-12s | %-8s | %-8s | %-9s | %-8s |\n",
+                   i + 1, "WAITING", "NO REPORT", "--", "--", "--", "UNKNOWN");
+            continue;
+        }
         freshness = !connected[routes[i]] || now < probes[routes[i]] ||
                     now - probes[routes[i]] >= HEARTBEAT_MISS_LIMIT * CENTRAL_NSEC ? "OFFLINE" :
                     !entry->synchronized ? "WAITING UPDATE" :
                     now < entry->received_at || now - entry->received_at >= central_monitor_status_max_age_ns(&view) ? "STALE" : "CURRENT";
-        output("I%u  %-9s %-11s %-7s %-7s %s/%s  %-7s %3us  %5.1fs %s\n",
+        output("| I%u | %-8s | %-12s | %-8s | %-8s | %-4s/%-4s | %-8s |\n",
                i + 1, mode_name(status->mode), phase_name(status->phase),
                light_name(status->ns_state), light_name(status->ew_state),
-               status->pedestrian_ns ? "WALK" : "STOP", status->pedestrian_ew ? "WALK" : "STOP",
-               status->railway_preempt ? "ACTIVE" : "CLEAR",
-               status->time_remaining, age_seconds(now, entry->received_at), freshness);
+               status->pedestrian_ns ? "WALK" : "STOP",
+               status->pedestrian_ew ? "WALK" : "STOP",
+               status->railway_preempt ? "HOLD" : "CLEAR");
         if (status->telemetry_version) {
-            output("    Seq %u Cmd %u Sensors NS/EW %u/%u PedReq %u/%u Sim %s %02u:%02u Train P/A/R %u/%u/%us Fault %s\n",
-                   (unsigned)status->status_sequence,
-                   (unsigned)status->last_command_id,
-                   (unsigned)status->sensor_ns_count,
-                   (unsigned)status->sensor_ew_count,
+            output("|    | Remain: %3us | Sensors NS/EW: %u/%u | PedReq: %u/%u | "
+                   "Sim: %s %02u:%02u | Train P/A/R: %u/%u/%us |\n",
+                   status->time_remaining,
+                   (unsigned)status->sensor_ns_count, (unsigned)status->sensor_ew_count,
                    (unsigned)status->pedestrian_ns_request,
                    (unsigned)status->pedestrian_ew_request,
                    status->sim_running ? "RUN" : "STOP",
@@ -289,36 +317,60 @@ static void display_ui(void) {
                    (unsigned)status->sim_minute_of_day % 60,
                    (unsigned)status->train_pending,
                    (unsigned)status->train_active,
-                   (unsigned)status->train_recovery_remaining,
-                   status->fault_active ? fault_name(status->fault_type) : "NONE");
+                   (unsigned)status->train_recovery_remaining);
+            output("|    | Health: %-8s | Link: %-13s | Age: %5.1fs | %-12s |\n",
+                   health, freshness, age_seconds(now, entry->received_at),
+                   status->fault_active ? fault_name(status->fault_type) : "CLEAR");
+            output("|    | Seq %u | Last cmd %u |                                           |\n",
+                   (unsigned)status->status_sequence,
+                   (unsigned)status->last_command_id);
         } else {
-            output("    Extended Local telemetry not reported by this peer\n");
+            output("|    | Health: %-8s | Link: %-13s | Age: %5.1fs | Telemetry: BASIC |\n",
+                   health, freshness, age_seconds(now, entry->received_at));
         }
-        if (central_monitor_health(&view, CONTROLLER_LOCAL, i) == 0)
-            output("    Reported health DEGRADED; commands blocked until explicit recovery\n");
     }
-    output("\nRailway crossings\n");
+
+    ui_panel("RAILWAY / CROSSINGS  |  TRAIN CONTROL AND GATE SAFETY");
+    output("| ID | TRAIN STATE  | GATE     | FAULT          | HEALTH   | AGE   | LINK   |\n");
+    output("|----+--------------+----------+----------------+----------+-------+--------|\n");
     for (i = 0; i < NUM_CROSSINGS; ++i) {
         static const char *trains[] = {"NONE", "APPROACHING", "AT CROSSING", "CLEAR"};
         static const char *gates[] = {"OPEN", "CLOSING", "CLOSED", "OPENING", "FAULT"};
         const central_crossing_status_t *entry = &view.crossings[i];
-        if (!entry->valid) { output("P%u  Waiting for status\n", i + 1); continue; }
-        output("P%u  Train %-11s Gate %-7s Fault %s Age %.1fs %s\n", i + 1,
-               trains[entry->status.train_state], gates[entry->status.gate_state],
-               fault_name(entry->status.fault), age_seconds(now, entry->received_at),
-               !central_peer_online(&view, CONTROLLER_TRAIN, now) ? "OFFLINE" :
-               !entry->synchronized ? "WAITING UPDATE" :
-                now < entry->received_at || now - entry->received_at >= central_monitor_status_max_age_ns(&view) ? "STALE" : "CURRENT");
-        if (central_monitor_health(&view, CONTROLLER_TRAIN, i) == 0)
-            output("    Reported health DEGRADED\n");
+        const char *link = central_peer_online(&view, CONTROLLER_TRAIN, now) ? "UP" : "DOWN";
+        if (!entry->valid) {
+            output("| P%u | %-12s | %-8s | %-14s | %-8s | --    | %-6s |\n",
+                   i + 1, "WAITING", "--", "UNKNOWN", "UNKNOWN", link);
+            continue;
+        }
+        output("| P%u | %-12s | %-8s | %-14s | %-8s | %5.1f | %-6s |\n",
+               i + 1, trains[entry->status.train_state], gates[entry->status.gate_state],
+               fault_name(entry->status.fault), ui_health(&view, CONTROLLER_TRAIN, i),
+               age_seconds(now, entry->received_at), link);
     }
-    output("Train approach signal, flashing lights and individual tracks: NOT REPORTED by v1.\n");
-    output("\nRecent events\n");
-    for (i = 0; i < count; ++i) output("%s\n", events[(next + 8 - count + i) % 8]);
-    if (dropped) output("Log records dropped: %u\n", dropped);
-    if (log_failed) output("EVENT LOG FAILED: new events are not being saved\n");
-    output("\nStatus age limit %.1fs. Remaining times are reported snapshots.\n",
-           (double)central_monitor_status_max_age_ns(&view) / CENTRAL_NSEC);
+
+    ui_panel("CONNECTIONS  |  DISTRIBUTED SYSTEM HEALTH");
+    output("| ENDPOINT          | LINK          | CONTACT       | HEALTH             |\n");
+    output("|-------------------+---------------+---------------+--------------------|\n");
+    output("| LOCAL CONTROLLERS | %-13s | %-13s | %-18s |\n",
+           ui_connection(&view.peers[0], central_peer_online(&view, CONTROLLER_LOCAL, now)),
+           central_peer_online(&view, CONTROLLER_LOCAL, now) ? "HEARTBEAT OK" : "LOST",
+           ui_health(&view, CONTROLLER_LOCAL, 0));
+    output("| TRAIN CONTROLLER  | %-13s | %-13s | %-18s |\n",
+           ui_connection(&view.peers[1], central_peer_online(&view, CONTROLLER_TRAIN, now)),
+           central_peer_online(&view, CONTROLLER_TRAIN, now) ? "HEARTBEAT OK" : "LOST",
+           ui_health(&view, CONTROLLER_TRAIN, 0));
+
+    ui_panel("RECENT EVENTS  |  ROLLING ACTIVITY FEED");
+    if (!count) output("| No events received yet.                                                     |\n");
+    for (i = 0; i < count; ++i) output("| %-74.74s |\n", events[(next + 8 - count + i) % 8]);
+    if (dropped) output("| Dropped log records: %-52u |\n", dropped);
+    if (log_failed) output("| EVENT LOG FAILED: new events are not being saved.                         |\n");
+
+    ui_panel("CONTROLS  |  OPERATOR COMMANDS");
+    output("| status  live snapshot     watch  continuous refresh     help  full help    |\n");
+    output("| commands command history  faults active faults          events event feed  |\n");
+    output("| quit    close this display (Central keeps running)                        |\n");
     if (!output_buffer && watching) output("Live view: press Enter to return to the command prompt.\n");
     if (!output_buffer) fflush(stdout);
 }

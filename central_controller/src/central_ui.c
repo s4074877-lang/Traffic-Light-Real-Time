@@ -26,10 +26,20 @@ static uint64_t monotonic_ns(void) {
 
 static const char *line_color(const char *line) {
     if (strstr(line, "FAULT") || strstr(line, "DEGRADED") || strstr(line, "OFFLINE") ||
-        strstr(line, "REJECTED") || strstr(line, "DISCONNECTED")) return "\033[31m";
+        strstr(line, "LOST") || strstr(line, "DOWN") || strstr(line, "REJECTED") ||
+        strstr(line, "DISCONNECTED") || strstr(line, "RAIL HOLD")) return "\033[1;31m";
     if (strstr(line, "STALE") || strstr(line, "WAITING") || strstr(line, "waiting") ||
-        strstr(line, "UNKNOWN") || strstr(line, "UNCONFIRMED")) return "\033[33m";
-    if (strstr(line, "CURRENT") || strstr(line, "CONNECTED")) return "\033[32m";
+        strstr(line, "UNKNOWN") || strstr(line, "UNCONFIRMED") || strstr(line, "CLOSING") ||
+        strstr(line, "CLOSED") || strstr(line, "HOLD")) return "\033[1;33m";
+    if (strstr(line, "CENTRAL CONTROL ROOM") || strstr(line, "INTERSECTIONS") ||
+        strstr(line, "RAILWAY /") || strstr(line, "CONNECTIONS") ||
+        strstr(line, "RECENT EVENTS") || strstr(line, "CONTROLS")) return "\033[1;36m";
+    if (strstr(line, "P1") || strstr(line, "P2") || strstr(line, "P3") ||
+        strstr(line, "RAILWAY") || strstr(line, "TRAIN")) return "\033[1;35m";
+    if (strstr(line, "CURRENT") || strstr(line, "CONNECTED") || strstr(line, "HEALTHY") ||
+        strstr(line, "HEARTBEAT OK") || strstr(line, "CLEAR") || strstr(line, "OPEN") ||
+        strstr(line, "GREEN") || strstr(line, "WALK") || strstr(line, "ONLINE") ||
+        strstr(line, "OPERATIONAL")) return "\033[1;32m";
     return "";
 }
 
@@ -131,10 +141,18 @@ int main(int argc, char **argv) {
                     size_t length = strlen(command);
                     while (length && (command[length - 1] == '\r' || command[length - 1] == ' ' ||
                                       command[length - 1] == '\t')) command[--length] = '\0';
-                    if (watching) { watching = 0; puts("Live view stopped."); }
+                    if (watching) {
+                        watching = 0;
+                        if (color) fputs("\033[?25h", stdout);
+                        puts("Live view stopped.");
+                    }
                     else if (overflow) puts("Command too long; request was not sent.");
                     else if (!strcmp(command, "quit")) interrupted = 1;
-                    else if (!strcmp(command, "watch")) { watching = 1; next_refresh = 0; }
+                    else if (!strcmp(command, "watch")) {
+                        watching = 1;
+                        next_refresh = 0;
+                        if (color) fputs("\033[?25l", stdout);
+                    }
                     else if (*command) request_core(name, command, color);
                     used = 0;
                     overflow = 0;
@@ -145,5 +163,6 @@ int main(int argc, char **argv) {
             }
         } else if (ready && (input.revents & (POLLERR | POLLNVAL))) return EXIT_FAILURE;
     }
+    if (color) fputs("\033[?25h\033[0m", stdout);
     return EXIT_SUCCESS;
 }
