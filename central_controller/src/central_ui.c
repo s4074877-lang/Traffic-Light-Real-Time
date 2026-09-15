@@ -2,6 +2,7 @@
 #include "version.h"
 
 #include <errno.h>
+#include <ctype.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdint.h>
@@ -131,6 +132,152 @@ static int request_core(const char *name, const char *request, int color) {
     return status;
 }
 
+
+static const char *shortcut_color(const char *key, size_t length) {
+    if (length < 3 || key[0] != '[' || key[length - 1] != ']') return UI_WHITE;
+    switch ((unsigned char)toupper((unsigned char)key[1])) {
+        case 'F': return UI_CYAN;     /* Fixed mode */
+        case 'S': return UI_BLUE;     /* Sensor mode */
+        case 'A': return UI_GREEN;    /* Start simulation */
+        case 'X': return UI_YELLOW;   /* Stop simulation */
+        case 'T': return UI_MAGENTA;  /* Train */
+        case '0': return UI_RED;      /* Quit */
+        case '1': case '2': case '3': case '4': case '5': return UI_GREEN;
+        default: return UI_WHITE;
+    }
+}
+
+#define QUICK_MENU_TEXT_WIDTH 74
+
+static void print_menu_border(int color) {
+    int i;
+    if (color) fputs(UI_DIM_CYAN, stdout);
+    putchar('+');
+    for (i = 0; i < QUICK_MENU_TEXT_WIDTH + 2; ++i) putchar('-');
+    putchar('+');
+    if (color) fputs(UI_RESET, stdout);
+    putchar('\n');
+}
+
+static void print_menu_text(const char *text, int color) {
+    size_t length = strlen(text), i = 0;
+    if (length > QUICK_MENU_TEXT_WIDTH) length = QUICK_MENU_TEXT_WIDTH;
+    if (color) fputs(UI_DIM_CYAN, stdout);
+    fputs("| ", stdout);
+    if (color) fputs(UI_RESET, stdout);
+
+    while (i < length) {
+        if (text[i] == '[') {
+            size_t end = i + 1;
+            while (end < length && text[end] != ']') ++end;
+            if (end < length && text[end] == ']') {
+                size_t key_length = end - i + 1;
+                if (color) fputs(shortcut_color(text + i, key_length), stdout);
+                fwrite(text + i, 1, key_length, stdout);
+                if (color) fputs(UI_RESET, stdout);
+                i = end + 1;
+                continue;
+            }
+        }
+        putchar((unsigned char)text[i]);
+        ++i;
+    }
+
+    for (i = length; i < QUICK_MENU_TEXT_WIDTH; ++i) putchar(' ');
+    if (color) fputs(UI_DIM_CYAN, stdout);
+    fputs(" |", stdout);
+    if (color) fputs(UI_RESET, stdout);
+    putchar('\n');
+}
+
+static void print_menu_center(const char *text, int color) {
+    char line[QUICK_MENU_TEXT_WIDTH + 1];
+    size_t length = strlen(text);
+    size_t left;
+    if (length > QUICK_MENU_TEXT_WIDTH) length = QUICK_MENU_TEXT_WIDTH;
+    memset(line, ' ', QUICK_MENU_TEXT_WIDTH);
+    line[QUICK_MENU_TEXT_WIDTH] = '\0';
+    left = (QUICK_MENU_TEXT_WIDTH - length) / 2;
+    memcpy(line + left, text, length);
+    print_menu_text(line, color);
+}
+
+static void print_quick_menu(int color) {
+    print_menu_border(color);
+    print_menu_center("OPERATOR QUICK MENU  -  TYPE [KEY] THEN PRESS ENTER", color);
+    print_menu_border(color);
+
+    print_menu_text("VIEW / MONITOR", color);
+    print_menu_text("[1] Live Dashboard             [2] Status Snapshot", color);
+    print_menu_text("[3] Recent Events              [4] Active Faults", color);
+    print_menu_text("[5] Command History", color);
+    print_menu_border(color);
+
+    print_menu_text("TRAFFIC MODE  -  SELECT INTERSECTION", color);
+    print_menu_text("FIXED : [F1] I1  [F2] I2  [F3] I3  [F4] I4  [F5] I5  [F6] I6", color);
+    print_menu_text("        [FA] ALL INTERSECTIONS", color);
+    print_menu_text("SENSOR: [S1] I1  [S2] I2  [S3] I3  [S4] I4  [S5] I5  [S6] I6", color);
+    print_menu_text("        [SA] ALL INTERSECTIONS", color);
+    print_menu_border(color);
+
+    print_menu_text("TRAFFIC SIMULATION", color);
+    print_menu_text("START : [A1] I1  [A2] I2  [A3] I3  [A4] I4  [A5] I5  [A6] I6", color);
+    print_menu_text("        [AA] START ALL", color);
+    print_menu_text("STOP  : [X1] I1  [X2] I2  [X3] I3  [X4] I4  [X5] I5  [X6] I6", color);
+    print_menu_text("        [XA] STOP ALL", color);
+    print_menu_border(color);
+
+    print_menu_text("RAILWAY / TRAIN", color);
+    print_menu_text("[TU] Train UP       [TD] Train DOWN       [TS] Train Status", color);
+    print_menu_border(color);
+
+    print_menu_text("DISPLAY / HELP", color);
+    print_menu_text("[H] Full Help       [M] Show Menu         [0] Quit Display", color);
+    print_menu_border(color);
+    print_menu_text("Example: type [S3] + Enter  ->  set I3 to SENSOR mode", color);
+    print_menu_border(color);
+}
+
+/* Translate presentation-friendly shortcuts into the existing Central command
+ * language. Returns 1 when translated, 0 when the input should be forwarded
+ * unchanged, 2 for local UI actions (menu/watch/quit). */
+static int translate_shortcut(const char *input, char *output, size_t size,
+                              int *start_watch, int *quit_ui, int *show_menu) {
+    char key[32];
+    size_t i, length = strlen(input);
+    if (length >= sizeof(key)) return 0;
+    for (i = 0; i <= length; ++i) key[i] = (char)toupper((unsigned char)input[i]);
+
+    *start_watch = *quit_ui = *show_menu = 0;
+
+    if (!strcmp(key, "1")) { *start_watch = 1; return 2; }
+    if (!strcmp(key, "2")) { snprintf(output, size, "status"); return 1; }
+    if (!strcmp(key, "3")) { snprintf(output, size, "events"); return 1; }
+    if (!strcmp(key, "4")) { snprintf(output, size, "faults"); return 1; }
+    if (!strcmp(key, "5")) { snprintf(output, size, "commands"); return 1; }
+    if (!strcmp(key, "H")) { snprintf(output, size, "help"); return 1; }
+    if (!strcmp(key, "M")) { *show_menu = 1; return 2; }
+    if (!strcmp(key, "0") || !strcmp(key, "Q")) { *quit_ui = 1; return 2; }
+
+    if (!strcmp(key, "FA")) { snprintf(output, size, "mode-fixed all"); return 1; }
+    if (!strcmp(key, "SA")) { snprintf(output, size, "mode-sensor all"); return 1; }
+    if (!strcmp(key, "AA")) { snprintf(output, size, "sim-start all"); return 1; }
+    if (!strcmp(key, "XA")) { snprintf(output, size, "sim-stop all"); return 1; }
+    if (!strcmp(key, "TU")) { snprintf(output, size, "train-cmd train-up"); return 1; }
+    if (!strcmp(key, "TD")) { snprintf(output, size, "train-cmd train-down"); return 1; }
+    if (!strcmp(key, "TS")) { snprintf(output, size, "train-cmd status"); return 1; }
+
+    if (length == 2 && key[1] >= '1' && key[1] <= '6') {
+        unsigned id = (unsigned)(key[1] - '0');
+        if (key[0] == 'F') { snprintf(output, size, "mode-fixed I%u", id); return 1; }
+        if (key[0] == 'S') { snprintf(output, size, "mode-sensor I%u", id); return 1; }
+        if (key[0] == 'A') { snprintf(output, size, "sim-start I%u", id); return 1; }
+        if (key[0] == 'X') { snprintf(output, size, "sim-stop I%u", id); return 1; }
+    }
+
+    return 0;
+}
+
 static void usage(const char *program) {
     printf("Usage: %s [-n local-service] [--no-color] [-c command]\n"
            "Separate Central display, build %s (%s %s).\n"
@@ -166,7 +313,8 @@ int main(int argc, char **argv) {
     if (sigaction(SIGINT, &action, NULL) || sigaction(SIGTERM, &action, NULL)) return EXIT_FAILURE;
     printf("Central display %s (%s %s); service %s.\n", CENTRAL_BUILD_VERSION, __DATE__, __TIME__, name);
     request_core(name, "status", color);
-    printf("Type help for commands; watch for live status; quit closes this UI.\n> ");
+    print_quick_menu(color);
+    printf("> ");
     fflush(stdout);
     while (!interrupted) {
         struct pollfd input = {STDIN_FILENO, POLLIN, 0};
@@ -200,13 +348,28 @@ int main(int argc, char **argv) {
                         puts("Live view stopped.");
                     }
                     else if (overflow) puts("Command too long; request was not sent.");
-                    else if (!strcmp(command, "quit")) interrupted = 1;
-                    else if (!strcmp(command, "watch")) {
-                        watching = 1;
-                        next_refresh = 0;
-                        if (color) fputs("\033[?25l", stdout);
+                    else if (*command) {
+                        char translated[CENTRAL_UI_REQUEST_SIZE];
+                        int start_watch = 0, quit_ui = 0, show_menu = 0;
+                        int shortcut = translate_shortcut(command, translated, sizeof(translated),
+                                                          &start_watch, &quit_ui, &show_menu);
+                        if (shortcut == 2) {
+                            if (quit_ui) interrupted = 1;
+                            else if (show_menu) print_quick_menu(color);
+                            else if (start_watch) {
+                                watching = 1;
+                                next_refresh = 0;
+                                if (color) fputs("\033[?25l", stdout);
+                            }
+                        } else if (shortcut == 1) request_core(name, translated, color);
+                        else if (!strcmp(command, "quit")) interrupted = 1;
+                        else if (!strcmp(command, "watch")) {
+                            watching = 1;
+                            next_refresh = 0;
+                            if (color) fputs("\033[?25l", stdout);
+                        }
+                        else request_core(name, command, color);
                     }
-                    else if (*command) request_core(name, command, color);
                     used = 0;
                     overflow = 0;
                     if (!watching && !interrupted) printf("> ");
