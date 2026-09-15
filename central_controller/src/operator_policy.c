@@ -80,6 +80,7 @@ int central_parse_train_command(const char *line,
     const char *direction;
     if (count == 1 &&
         (strcmp(tokens[0], "train-up") == 0 || strcmp(tokens[0], "train-down") == 0 ||
+         strcmp(tokens[0], "train-both") == 0 ||
          strcmp(tokens[0], "test") == 0 || strcmp(tokens[0], "status") == 0)) {
         snprintf(canonical, sizeof(canonical), "%s", tokens[0]);
     } else if (count == 1 && strlen(tokens[0]) == 8 &&

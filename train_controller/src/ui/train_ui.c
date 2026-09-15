@@ -293,6 +293,7 @@ static void display_command_internal(train_ui_state_t *ui)
     printf("  %sCrossing Simulation:%s\n", COLOR_BOLD, COLOR_RESET);
     printf("    %strain-up%s       - Train W->E through P3->P2->P1\n", COLOR_CYAN, COLOR_RESET);
     printf("    %strain-down%s     - Train E->W through P1->P2->P3\n", COLOR_CYAN, COLOR_RESET);
+    printf("    %strain-both%s     - Start train-up and train-down together\n", COLOR_CYAN, COLOR_RESET);
     printf("    %strain P# dir%s   - Single train (e.g., train P1 up)\n", COLOR_CYAN, COLOR_RESET);
     printf("\n");
     printf("  %sFault Injection:%s\n", COLOR_BOLD, COLOR_RESET);

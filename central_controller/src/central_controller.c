@@ -359,7 +359,8 @@ static void print_help(void) {
            "  sim-time <I1..I6|all> <HH:MM>\n"
            "  coordinate <I1..I6|all> <NS|EW> <offset 0..63>\n"
            "  coordinate-at <delay 1..3600s> <I1..I6|all> <NS|EW> <offset 0..63>\n"
-           "  train-cmd <train-up|train-down|train P# up/down|noexit P# up/down>\n"
+           "  train-cmd <train-up|train-down|train-both|train P# up/down|noexit P# up/down>\n"
+           "  train-up | train-down | train-both | train P# up/down  (train-cmd prefix optional)\n"
            "  train-cmd <stuck P#|reset P#|test [1..9]|scale 1..100|status>\n"
            "  schedule | schedule-resume <I1..I6|all> | version\n"
            "  map | status | commands | faults | events | help | quit\n"
@@ -1275,9 +1276,12 @@ static void execute_command(char *line) {
             output("Central schedule resumed; requests wait for fresh Local status. Local owns safe transitions.\n");
         }
     }
-    else if (!strncmp(line, "train-cmd ", 10)) {
+    else if (!strncmp(line, "train-cmd ", 10) || !strncmp(line, "train", 5)) {
+        /* Bare train-up, train-down, train-both and train P# up|down are
+           accepted as if prefixed with train-cmd. */
+        const char *train_line = !strncmp(line, "train-cmd ", 10) ? line + 10 : line;
         char payload[CENTRAL_TRAIN_PAYLOAD_SIZE];
-        if (!central_parse_train_command(line + 10, payload)) { command_result = -1; output("Invalid Train simulation command. Type help.\n"); }
+        if (!central_parse_train_command(train_line, payload)) { command_result = -1; output("Invalid Train simulation command. Type help.\n"); }
         else if (payload[0] == 'p' && strstr(payload, "-fault")) {
             command_result = -1;
             output("Not sent: current Train remote p#-fault handler can deadlock on its mutex.\n"
