@@ -361,7 +361,7 @@ static void print_help(void) {
            "  coordinate-at <delay 1..3600s> <I1..I6|all> <NS|EW> <offset 0..63>\n"
            "  train-cmd <train-up|train-down|train-both|train P# up/down|noexit P# up/down>\n"
            "  train-up | train-down | train-both | train P# up/down  (train-cmd prefix optional)\n"
-           "  train-cmd <stuck P#|reset P#|test [1..9]|scale 1..100|status>\n"
+           "  train-cmd <stuck P#|reset P#|scale 1..100|status>\n"
            "  schedule | schedule-resume <I1..I6|all> | version\n"
            "  map | status | commands | faults | events | help | quit\n"
            "  watch  (legacy live detailed status)\n"

@@ -81,7 +81,6 @@ is `/tmp/central_controller.log`; select a writable persistent path when needed.
 | `train-cmd noexit P1 up` | Simulate missing train exit |
 | `train-cmd stuck P1` | Simulate a stuck gate on its next movement |
 | `train-cmd reset P1` | Request the Train simulator's reset behavior |
-| `train-cmd test` / `train-cmd test 1` | Invoke existing Train tests, number 1–7 |
 | `train-cmd scale 5` | Simulator time scale, 1–100 |
 | `train-cmd status` | Train processes status; current peer discards its text result |
 | `status`, `commands`, `faults`, `events` | Reports, history, latched alerts, recent events |

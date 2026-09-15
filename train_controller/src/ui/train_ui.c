@@ -301,9 +301,7 @@ static void display_command_internal(train_ui_state_t *ui)
     printf("    %sreset P#%s       - Reset fault (e.g., reset P1)\n", COLOR_CYAN, COLOR_RESET);
     printf("    %sstuck P#%s       - Make gate stuck\n", COLOR_CYAN, COLOR_RESET);
     printf("\n");
-    printf("  %sTesting:%s\n", COLOR_BOLD, COLOR_RESET);
-    printf("    %stest%s           - Run all requirement tests\n", COLOR_CYAN, COLOR_RESET);
-    printf("    %stest N%s         - Run single test (1-7)\n", COLOR_CYAN, COLOR_RESET);
+    printf("  %sSimulator:%s\n", COLOR_BOLD, COLOR_RESET);
     printf("    %sscale N%s        - Set time scale (1-100)\n", COLOR_CYAN, COLOR_RESET);
     printf("    %sstatus%s         - Show simulator status\n", COLOR_CYAN, COLOR_RESET);
     printf("    %shelp%s           - Show all simulator commands\n", COLOR_CYAN, COLOR_RESET);

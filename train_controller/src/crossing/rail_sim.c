@@ -1,5 +1,4 @@
 #include "rail_sim.h"
-#include "crossing_test.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -639,24 +638,6 @@ static bool command_locked(const char *cmd, char *reply, size_t reply_len)
         return false;
     }
 
-    // ===== test: run all requirement tests =====
-    if (strcmp(cmd, "test") == 0)
-    {
-        return crossing_test_run_all(reply, reply_len);
-    }
-
-    // ===== test N: run single test =====
-    if (strncmp(cmd, "test ", 5) == 0)
-    {
-        int n = atoi(cmd + 5);
-        if (n >= 1 && n <= crossing_test_count())
-        {
-            return crossing_test_run_single(n, reply, reply_len);
-        }
-        snprintf(reply, reply_len, "ERROR: Test number must be 1-%d", crossing_test_count());
-        return false;
-    }
-
     // ===== scale N: set time scale =====
     if (strncmp(cmd, "scale ", 6) == 0)
     {
@@ -698,12 +679,9 @@ static bool command_locked(const char *cmd, char *reply, size_t reply_len)
                  "  stuck P#       - Make gate stuck\n"
                  "  p#-fault       - Inject fault (e.g., p1-fault)\n"
                  "  reset P#       - Reset fault and unstick gate\n"
-                 "  test           - Run all requirement tests\n"
-                 "  test N         - Run single test (1-%d)\n"
                  "  scale N        - Set time scale (1-100)\n"
                  "  status         - Show simulator status\n"
-                 "  help           - Show this help",
-                 crossing_test_count());
+                 "  help           - Show this help");
         return true;
     }
 
