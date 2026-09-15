@@ -25,7 +25,7 @@
 #define SIM_TICK_MS             100     // Simulator tick interval in milliseconds
 
 // Event queue
-#define MAX_PENDING_EVENTS      32      // Maximum queued simulation events
+#define MAX_PENDING_EVENTS      64      // Maximum queued simulation events (UP + DOWN trains and timers)
 
 // Test timing (faster for automated tests)
 #define TEST_GATE_CLOSE_DELAY_SEC   1

@@ -63,6 +63,7 @@ static void write_fixture(const char *path, const void *contents, size_t length)
 static void test_train_parser(void) {
     train_accept("train-up", "train-up");
     train_accept("train-down", "train-down");
+    train_accept("train-both", "train-both");
     train_accept(" \ttrain p1 UP  ", "train P1 up");
     train_accept("noexit P3 DOWN", "noexit P3 down");
     train_accept("stuck p2", "stuck P2");

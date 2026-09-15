@@ -77,7 +77,7 @@ void rail_sim_set_time_scale(int scale);
 // Status
 // ============================================
 
-// Check if a simulation command is currently running
+// Check if any simulated train (UP or DOWN track) is still running
 bool rail_sim_is_busy(void);
 
 // Get simulation elapsed time in seconds (scaled)

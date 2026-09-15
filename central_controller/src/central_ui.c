@@ -238,7 +238,7 @@ static void print_quick_menu(int color) {
     print_menu_border(color);
 
     print_menu_text("RAILWAY / TRAIN", color);
-    print_menu_text("[TU] Train UP       [TD] Train DOWN       [TS] Train Status", color);
+    print_menu_text("[TU] Train UP   [TD] Train DOWN   [TB] Both UP+DOWN   [TS] Train Status", color);
     print_menu_border(color);
 
     print_menu_text("DISPLAY / HELP", color);
@@ -276,6 +276,7 @@ static int translate_shortcut(const char *input, char *output, size_t size,
     if (!strcmp(key, "XA")) { snprintf(output, size, "sim-stop all"); return 1; }
     if (!strcmp(key, "TU")) { snprintf(output, size, "train-cmd train-up"); return 1; }
     if (!strcmp(key, "TD")) { snprintf(output, size, "train-cmd train-down"); return 1; }
+    if (!strcmp(key, "TB")) { snprintf(output, size, "train-cmd train-both"); return 1; }
     if (!strcmp(key, "TS")) { snprintf(output, size, "train-cmd status"); return 1; }
 
     if (length == 2 && key[1] >= '1' && key[1] <= '6') {

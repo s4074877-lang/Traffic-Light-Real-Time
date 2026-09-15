@@ -45,7 +45,6 @@ static struct
     int64_t sim_time_ms; // Current simulation time (tick-based)
     uint32_t tick_count; // Number of ticks since start
 
-    bool busy; // Command in progress
     bool initialized;
 } sim;
 
@@ -184,8 +183,9 @@ static int tick_locked(void)
     // Update simulation time based on tick count and time scale
     // Each tick is SIM_TICK_MS real milliseconds
     // With time_scale, simulation runs faster
+    // Accumulate per tick so changing the scale doesn't rescale elapsed time
     sim.tick_count++;
-    sim.sim_time_ms = (int64_t)sim.tick_count * SIM_TICK_MS * sim.time_scale;
+    sim.sim_time_ms += (int64_t)SIM_TICK_MS * sim.time_scale;
 
     int processed = 0;
 
@@ -235,21 +235,6 @@ static int tick_locked(void)
             ev->active = false;
             processed++;
         }
-    }
-
-    // Check if any command sequence completed
-    bool any_active = false;
-    for (int i = 0; i < MAX_PENDING_EVENTS; i++)
-    {
-        if (sim.events[i].active)
-        {
-            any_active = true;
-            break;
-        }
-    }
-    if (!any_active)
-    {
-        sim.busy = false;
     }
 
     return processed;
@@ -304,7 +289,7 @@ void rail_sim_cancel_timer(crossing_t *cx, timer_id_t timer_id)
     lock_sim();
 
     // Timers are cancelled by incrementing generation in crossing.c
-    // But we also need to deactivate the queued event to clear the busy flag
+    // But we also deactivate the queued event so its slot is freed
     for (int i = 0; i < MAX_PENDING_EVENTS; i++)
     {
         if (sim.events[i].active &&
@@ -333,6 +318,118 @@ static int parse_crossing_id(const char *s)
         return s[0] - '0';
     }
     return -1;
+}
+
+// ============================================
+// Internal: Train Track Occupancy
+// ============================================
+// Queued trains are tracked per crossing and track, so trains on the UP and
+// DOWN tracks can run at the same time. Only two trains on the same track at
+// the same crossing are prevented from overlapping.
+
+// Worst-case timer events the crossings may queue while trains run
+#define TIMER_EVENT_RESERVE (NUM_CROSSINGS * NUM_TIMERS)
+
+static bool is_train_event(crossing_event_t event)
+{
+    return event == CX_EVENT_TRAIN_APPROACH ||
+           event == CX_EVENT_TRAIN_ENTER ||
+           event == CX_EVENT_TRAIN_EXIT;
+}
+
+// True if a queued train event targets this crossing's track
+static bool train_pending(const crossing_t *cx, cx_track_direction_t dir)
+{
+    for (int i = 0; i < MAX_PENDING_EVENTS; i++)
+    {
+        const sim_event_t *ev = &sim.events[i];
+        if (ev->active && is_train_event(ev->event) && ev->cx == cx && ev->dir == dir)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+// True if a train is still running anywhere on this track
+static bool track_pending(cx_track_direction_t dir)
+{
+    for (int i = 0; i < sim.num_crossings; i++)
+    {
+        if (train_pending(&sim.crossings[i], dir))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static int free_event_slots(void)
+{
+    int free_slots = 0;
+    for (int i = 0; i < MAX_PENDING_EVENTS; i++)
+    {
+        if (!sim.events[i].active)
+        {
+            free_slots++;
+        }
+    }
+    return free_slots;
+}
+
+static const char *dir_name(cx_track_direction_t dir)
+{
+    return dir == CX_TRACK_UP ? "UP" : "DOWN";
+}
+
+// Check a new train can start on this track at one crossing (or every
+// crossing when cx is NULL) and that its events plus timers fit in the queue
+static bool can_start_train(const crossing_t *cx, cx_track_direction_t dir, int events,
+                            char *reply, size_t reply_len)
+{
+    for (int i = 0; i < sim.num_crossings; i++)
+    {
+        const crossing_t *target = &sim.crossings[i];
+        if ((cx == NULL || cx == target) && train_pending(target, dir))
+        {
+            snprintf(reply, reply_len, "BUSY: Train already running on %s %s track",
+                     target->name, dir_name(dir));
+            return false;
+        }
+    }
+
+    if (free_event_slots() < events + TIMER_EVENT_RESERVE)
+    {
+        snprintf(reply, reply_len, "BUSY: Simulation event queue full");
+        return false;
+    }
+
+    return true;
+}
+
+// ============================================
+// Internal: Simulate train along the whole line
+// ============================================
+// UP runs W->E through P3->P2->P1, DOWN runs E->W through P1->P2->P3
+static void simulate_train_on_line(cx_track_direction_t dir)
+{
+    for (int step = 0; step < sim.num_crossings; step++)
+    {
+        int i = dir == CX_TRACK_UP ? sim.num_crossings - 1 - step : step;
+        crossing_t *cx = &sim.crossings[i];
+        int delay = step * TRAIN_TRAVEL_TIME_SEC;
+
+        // Queue approach
+        queue_event(cx, CX_EVENT_TRAIN_APPROACH, dir, 0, delay);
+
+        // Queue enter
+        int enter_delay = delay + GATE_CLOSE_DELAY_SEC + GATE_MOVE_DURATION_SEC + 2;
+        queue_event(cx, CX_EVENT_TRAIN_ENTER, dir, 0, enter_delay);
+
+        // Queue exit
+        int exit_delay = enter_delay + TRAIN_CROSSING_TIME_SEC;
+        queue_event(cx, CX_EVENT_TRAIN_EXIT, dir, 0, exit_delay);
+    }
 }
 
 // ============================================
@@ -377,58 +474,41 @@ static bool command_locked(const char *cmd, char *reply, size_t reply_len)
         return false;
     }
 
-    // Check if busy
-    if (sim.busy && strncmp(cmd, "test", 4) != 0 && strcmp(cmd, "help") != 0)
+    // ===== train-both: start UP and DOWN trains at the same time =====
+    if (strcmp(cmd, "train-both") == 0)
     {
-        snprintf(reply, reply_len, "BUSY: Command in progress");
-        return false;
+        // Check both tracks and room for both runs before queuing either
+        int events = 6 * sim.num_crossings;
+        if (!can_start_train(NULL, CX_TRACK_UP, events, reply, reply_len) ||
+            !can_start_train(NULL, CX_TRACK_DOWN, events, reply, reply_len))
+            return false;
+
+        simulate_train_on_line(CX_TRACK_UP);
+        simulate_train_on_line(CX_TRACK_DOWN);
+        snprintf(reply, reply_len, "OK: Train UP (P3->P2->P1) and DOWN (P1->P2->P3) started");
+        return true;
     }
 
     // ===== train-up: simulate train W->E through P3->P2->P1 =====
+    // Runs alongside a train on the DOWN track
     if (strcmp(cmd, "train-up") == 0)
     {
-        sim.busy = true;
+        if (!can_start_train(NULL, CX_TRACK_UP, 3 * sim.num_crossings, reply, reply_len))
+            return false;
 
-        for (int i = sim.num_crossings - 1; i >= 0; i--)
-        {
-            int delay = (sim.num_crossings - 1 - i) * TRAIN_TRAVEL_TIME_SEC;
-            crossing_t *cx = &sim.crossings[i];
-
-            // Queue approach
-            queue_event(cx, CX_EVENT_TRAIN_APPROACH, CX_TRACK_UP, 0, delay);
-
-            // Queue enter
-            int enter_delay = delay + GATE_CLOSE_DELAY_SEC + GATE_MOVE_DURATION_SEC + 2;
-            queue_event(cx, CX_EVENT_TRAIN_ENTER, CX_TRACK_UP, 0, enter_delay);
-
-            // Queue exit
-            int exit_delay = enter_delay + TRAIN_CROSSING_TIME_SEC;
-            queue_event(cx, CX_EVENT_TRAIN_EXIT, CX_TRACK_UP, 0, exit_delay);
-        }
-
+        simulate_train_on_line(CX_TRACK_UP);
         snprintf(reply, reply_len, "OK: Train UP (W->E) P3->P2->P1 started");
         return true;
     }
 
     // ===== train-down: simulate train E->W through P1->P2->P3 =====
+    // Runs alongside a train on the UP track
     if (strcmp(cmd, "train-down") == 0)
     {
-        sim.busy = true;
+        if (!can_start_train(NULL, CX_TRACK_DOWN, 3 * sim.num_crossings, reply, reply_len))
+            return false;
 
-        for (int i = 0; i < sim.num_crossings; i++)
-        {
-            int delay = i * TRAIN_TRAVEL_TIME_SEC;
-            crossing_t *cx = &sim.crossings[i];
-
-            queue_event(cx, CX_EVENT_TRAIN_APPROACH, CX_TRACK_DOWN, 0, delay);
-
-            int enter_delay = delay + GATE_CLOSE_DELAY_SEC + GATE_MOVE_DURATION_SEC + 2;
-            queue_event(cx, CX_EVENT_TRAIN_ENTER, CX_TRACK_DOWN, 0, enter_delay);
-
-            int exit_delay = enter_delay + TRAIN_CROSSING_TIME_SEC;
-            queue_event(cx, CX_EVENT_TRAIN_EXIT, CX_TRACK_DOWN, 0, exit_delay);
-        }
-
+        simulate_train_on_line(CX_TRACK_DOWN);
         snprintf(reply, reply_len, "OK: Train DOWN (E->W) P1->P2->P3 started");
         return true;
     }
@@ -453,7 +533,9 @@ static bool command_locked(const char *cmd, char *reply, size_t reply_len)
                 dir = CX_TRACK_DOWN;
             }
 
-            sim.busy = true;
+            if (!can_start_train(cx, dir, 3, reply, reply_len))
+                return false;
+
             simulate_train_at_crossing(cx, dir, false);
             snprintf(reply, reply_len, "OK: Train at %s %s started",
                      cx->name, dir == CX_TRACK_UP ? "UP" : "DOWN");
@@ -481,7 +563,9 @@ static bool command_locked(const char *cmd, char *reply, size_t reply_len)
                 dir = CX_TRACK_DOWN;
             }
 
-            sim.busy = true;
+            if (!can_start_train(cx, dir, 2, reply, reply_len))
+                return false;
+
             simulate_train_at_crossing(cx, dir, true);
             snprintf(reply, reply_len, "OK: No-exit train at %s %s started",
                      cx->name, dir == CX_TRACK_UP ? "UP" : "DOWN");
@@ -591,11 +675,12 @@ static bool command_locked(const char *cmd, char *reply, size_t reply_len)
     if (strcmp(cmd, "status") == 0)
     {
         snprintf(reply, reply_len,
-                 "Sim: %s, Scale: x%d, Elapsed: %ds, Busy: %s",
+                 "Sim: %s, Scale: x%d, Elapsed: %ds, Train UP: %s, Train DOWN: %s",
                  sim.initialized ? "OK" : "NOT INIT",
                  sim.time_scale,
                  rail_sim_get_elapsed_sec(),
-                 sim.busy ? "YES" : "NO");
+                 track_pending(CX_TRACK_UP) ? "RUNNING" : "IDLE",
+                 track_pending(CX_TRACK_DOWN) ? "RUNNING" : "IDLE");
         return true;
     }
 
@@ -606,6 +691,8 @@ static bool command_locked(const char *cmd, char *reply, size_t reply_len)
                  "Commands:\n"
                  "  train-up       - Train W->E through P3->P2->P1\n"
                  "  train-down     - Train E->W through P1->P2->P3\n"
+                 "  train-both     - Start train-up and train-down together\n"
+                 "                   (UP and DOWN trains can run at the same time)\n"
                  "  train P# dir   - Single train at crossing (dir=up/down)\n"
                  "  noexit P# dir  - Train that never exits\n"
                  "  stuck P#       - Make gate stuck\n"
@@ -659,7 +746,7 @@ void rail_sim_set_time_scale(int scale)
 bool rail_sim_is_busy(void)
 {
     lock_sim();
-    bool busy = sim.busy;
+    bool busy = track_pending(CX_TRACK_UP) || track_pending(CX_TRACK_DOWN);
     unlock_sim();
     return busy;
 }
