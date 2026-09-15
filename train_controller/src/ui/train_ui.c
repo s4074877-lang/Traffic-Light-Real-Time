@@ -293,6 +293,7 @@ static void display_command_internal(train_ui_state_t *ui)
     printf("  %sCrossing Simulation:%s\n", COLOR_BOLD, COLOR_RESET);
     printf("    %strain-up%s       - Train W->E through P3->P2->P1\n", COLOR_CYAN, COLOR_RESET);
     printf("    %strain-down%s     - Train E->W through P1->P2->P3\n", COLOR_CYAN, COLOR_RESET);
+    printf("    %strain-both%s     - Start train-up and train-down together\n", COLOR_CYAN, COLOR_RESET);
     printf("    %strain P# dir%s   - Single train (e.g., train P1 up)\n", COLOR_CYAN, COLOR_RESET);
     printf("\n");
     printf("  %sFault Injection:%s\n", COLOR_BOLD, COLOR_RESET);
@@ -300,9 +301,7 @@ static void display_command_internal(train_ui_state_t *ui)
     printf("    %sreset P#%s       - Reset fault (e.g., reset P1)\n", COLOR_CYAN, COLOR_RESET);
     printf("    %sstuck P#%s       - Make gate stuck\n", COLOR_CYAN, COLOR_RESET);
     printf("\n");
-    printf("  %sTesting:%s\n", COLOR_BOLD, COLOR_RESET);
-    printf("    %stest%s           - Run all requirement tests\n", COLOR_CYAN, COLOR_RESET);
-    printf("    %stest N%s         - Run single test (1-7)\n", COLOR_CYAN, COLOR_RESET);
+    printf("  %sSimulator:%s\n", COLOR_BOLD, COLOR_RESET);
     printf("    %sscale N%s        - Set time scale (1-100)\n", COLOR_CYAN, COLOR_RESET);
     printf("    %sstatus%s         - Show simulator status\n", COLOR_CYAN, COLOR_RESET);
     printf("    %shelp%s           - Show all simulator commands\n", COLOR_CYAN, COLOR_RESET);

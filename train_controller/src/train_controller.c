@@ -311,6 +311,7 @@ static int handle_test_message(int rcvid, test_message_t *msg, reply_t *reply, v
     {
         char cmd_reply[256];
         rail_sim_command(command, cmd_reply, sizeof(cmd_reply));
+        train_ui_set_time_scale(&ui_state, rail_sim_get_time_scale());
     }
 
     reply->status = 0;
@@ -797,7 +798,9 @@ static int execute_command(const char *cmd)
     {
         // Try as a crossing/simulator command
         char reply[512];
-        if (rail_sim_command(cmd, reply, sizeof(reply)))
+        bool ok = rail_sim_command(cmd, reply, sizeof(reply));
+        train_ui_set_time_scale(&ui_state, rail_sim_get_time_scale());
+        if (ok)
         {
             printf("%s%s%s\n", COLOR_GREEN, reply, COLOR_RESET);
             return 0;

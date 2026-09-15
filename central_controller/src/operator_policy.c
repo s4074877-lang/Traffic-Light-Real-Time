@@ -80,7 +80,8 @@ int central_parse_train_command(const char *line,
     const char *direction;
     if (count == 1 &&
         (strcmp(tokens[0], "train-up") == 0 || strcmp(tokens[0], "train-down") == 0 ||
-         strcmp(tokens[0], "test") == 0 || strcmp(tokens[0], "status") == 0)) {
+         strcmp(tokens[0], "train-both") == 0 ||
+         strcmp(tokens[0], "status") == 0)) {
         snprintf(canonical, sizeof(canonical), "%s", tokens[0]);
     } else if (count == 1 && strlen(tokens[0]) == 8 &&
                (tokens[0][0] == 'p' || tokens[0][0] == 'P') &&
@@ -97,9 +98,6 @@ int central_parse_train_command(const char *line,
                (strcmp(tokens[0], "stuck") == 0 || strcmp(tokens[0], "reset") == 0) &&
                parse_crossing(tokens[1], &crossing)) {
         snprintf(canonical, sizeof(canonical), "%s P%u", tokens[0], crossing);
-    } else if (count == 2 && strcmp(tokens[0], "test") == 0 &&
-               parse_unsigned(tokens[1], 1, 9, &value)) {
-        snprintf(canonical, sizeof(canonical), "test %u", value);
     } else if (count == 2 && strcmp(tokens[0], "scale") == 0 &&
                parse_unsigned(tokens[1], 1, 100, &value)) {
         snprintf(canonical, sizeof(canonical), "scale %u", value);

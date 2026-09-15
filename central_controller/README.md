@@ -76,11 +76,11 @@ is `/tmp/central_controller.log`; select a writable persistent path when needed.
 | `sim-time I1 07:00` | Request a Local simulated time, exact `HH:MM` in 24-hour format |
 | `train-cmd train-up` | Simulate W→E through P3→P2→P1 |
 | `train-cmd train-down` | Simulate E→W through P1→P2→P3 |
+| `train-cmd train-both` | Start the UP and DOWN trains at the same time |
 | `train-cmd train P1 up` | Simulate one crossing/direction; `down` also supported |
 | `train-cmd noexit P1 up` | Simulate missing train exit |
 | `train-cmd stuck P1` | Simulate a stuck gate on its next movement |
 | `train-cmd reset P1` | Request the Train simulator's reset behavior |
-| `train-cmd test` / `train-cmd test 1` | Invoke existing Train tests, number 1–7 |
 | `train-cmd scale 5` | Simulator time scale, 1–100 |
 | `train-cmd status` | Train processes status; current peer discards its text result |
 | `status`, `commands`, `faults`, `events` | Reports, history, latched alerts, recent events |
