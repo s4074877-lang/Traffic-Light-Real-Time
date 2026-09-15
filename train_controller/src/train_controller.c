@@ -552,7 +552,7 @@ static void queue_railway_message(const crossing_t *cx, msg_type_t type)
         // Local matches on the crossing ID (1..3), not its own intersection ID
         item.msg.railway.payload.intersection_id = cx->id;
         item.msg.railway.payload.active = type == MSG_RAILWAY_PREEMPT ? 1 : 0;
-        item.msg.railway.payload.eta_seconds = type == MSG_RAILWAY_PREEMPT ? GATE_CLOSE_DELAY_SEC + 5 : 0;
+        item.msg.railway.payload.eta_seconds = type == MSG_RAILWAY_PREEMPT ? rail_sim_get_warning_sec() : 0;
 
         outbox_push(&item);
     }
@@ -876,6 +876,15 @@ int main(int argc, char *argv[])
     // Initialize rail simulator
     rail_sim_init(crossings, NUM_CROSSINGS, DEFAULT_TIME_SCALE);
     train_ui_set_time_scale(&ui_state, DEFAULT_TIME_SCALE);
+
+    // Report track settings refused by the simulator (defaults are used)
+    const char *config_notice = rail_sim_config_notice();
+    if (config_notice[0] != '\0')
+    {
+        printf("%sTrain config: %s%s\n", COLOR_YELLOW, config_notice, COLOR_RESET);
+        fflush(stdout);
+        sleep(3); // Keep the notice readable before the UI redraws
+    }
 
     // Register with name service
     attach = connection_register_service(TRAIN_SERVICE_NAME, mode);

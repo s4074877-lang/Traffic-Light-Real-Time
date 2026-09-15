@@ -45,10 +45,13 @@ static struct
     uint32_t tick_count; // Number of ticks since start
 
     bool initialized;
-} sim;
 
-// Gate movement duration (scaled simulation seconds to ms)
-#define GATE_MOVE_DURATION_SEC 3
+    // Track layout in use (compile-time config after validation)
+    int distance_sec[2];    // [0] P1-P2, [1] P2-P3 travel, front to front
+    int train_length_sec;   // Time the train occupies a crossing
+    int warning_sec;        // PREEMPT lead time before the train arrives
+    char config_notice[256]; // Refused config values, empty if none
+} sim;
 
 // ============================================
 // Simulator Lock
@@ -137,6 +140,44 @@ static bool queue_event(crossing_t *cx, crossing_event_t event,
 }
 
 // ============================================
+// Internal: Track Layout Config
+// ============================================
+// Use a configured value when it is in range; otherwise refuse it, note why
+// and fall back to the default
+static int config_value(const char *name, int value, int min, int max, int fallback)
+{
+    if (value >= min && value <= max)
+    {
+        return value;
+    }
+
+    size_t used = strlen(sim.config_notice);
+    snprintf(sim.config_notice + used, sizeof(sim.config_notice) - used,
+             "%s%s=%d refused (allowed %d-%d), using default %d",
+             used ? "; " : "", name, value, min, max, fallback);
+    return fallback;
+}
+
+static void apply_config_locked(void)
+{
+    sim.config_notice[0] = '\0';
+
+    sim.distance_sec[0] = DISTANCE_UNIT_SEC *
+        config_value("DISTANCE_P1_P2_UNITS", DISTANCE_P1_P2_UNITS,
+                     DISTANCE_MIN_UNITS, DISTANCE_MAX_UNITS, DEFAULT_DISTANCE_UNITS);
+    sim.distance_sec[1] = DISTANCE_UNIT_SEC *
+        config_value("DISTANCE_P2_P3_UNITS", DISTANCE_P2_P3_UNITS,
+                     DISTANCE_MIN_UNITS, DISTANCE_MAX_UNITS, DEFAULT_DISTANCE_UNITS);
+    // Length must stay below the train timeout or every train would fault
+    sim.train_length_sec = config_value("TRAIN_LENGTH_SEC", TRAIN_LENGTH_SEC,
+                                        1, TRAIN_TIMEOUT_SEC - 1, DEFAULT_TRAIN_LENGTH_SEC);
+    // Warning must leave time for the gate to close before the train arrives
+    sim.warning_sec = config_value("TRAIN_WARNING_SEC", TRAIN_WARNING_SEC,
+                                   TRAIN_WARNING_MIN_SEC, TRAIN_WARNING_MAX_SEC,
+                                   DEFAULT_TRAIN_WARNING_SEC);
+}
+
+// ============================================
 // Initialize Simulator
 // ============================================
 void rail_sim_init(crossing_t *crossings, int num_crossings, int time_scale)
@@ -151,6 +192,7 @@ void rail_sim_init(crossing_t *crossings, int num_crossings, int time_scale)
     sim.tick_count = 0;
     sim.sim_time_ms = 0;
     sim.initialized = true;
+    apply_config_locked();
 
     for (int i = 0; i < 3; i++)
     {
@@ -259,7 +301,7 @@ void rail_sim_gate_command(crossing_t *cx, gate_command_t cmd)
     if (sim.initialized && cx->id >= 1 && cx->id <= 3 && !sim.gates[cx->id - 1].stuck)
     {
         // Schedule gate movement completion
-        sim.gates[cx->id - 1].move_complete_ms = sim.sim_time_ms + sec_to_sim_ms(GATE_MOVE_DURATION_SEC);
+        sim.gates[cx->id - 1].move_complete_ms = sim.sim_time_ms + sec_to_sim_ms(GATE_MOVE_SEC);
     }
 
     unlock_sim();
@@ -409,25 +451,29 @@ static bool can_start_train(const crossing_t *cx, cx_track_direction_t dir, int 
 // ============================================
 // Internal: Simulate train along the whole line
 // ============================================
-// UP runs W->E through P3->P2->P1, DOWN runs E->W through P1->P2->P3
+// UP runs W->E through P3->P2->P1, DOWN runs E->W through P1->P2->P3.
+// Each crossing is warned warning_sec before the front arrives, entered on
+// arrival and cleared train_length_sec later, so a long train can still be on
+// one crossing when the next crossing is warned.
 static void simulate_train_on_line(cx_track_direction_t dir)
 {
+    int arrive = sim.warning_sec; // Seconds until the front reaches the first crossing
+
     for (int step = 0; step < sim.num_crossings; step++)
     {
         int i = dir == CX_TRACK_UP ? sim.num_crossings - 1 - step : step;
         crossing_t *cx = &sim.crossings[i];
-        int delay = step * TRAIN_TRAVEL_TIME_SEC;
 
-        // Queue approach
-        queue_event(cx, CX_EVENT_TRAIN_APPROACH, dir, 0, delay);
+        if (step > 0)
+        {
+            // Travel from the previous crossing: index 0/1 is P1-P2, 1/2 is P2-P3
+            int previous = dir == CX_TRACK_UP ? i + 1 : i - 1;
+            arrive += sim.distance_sec[i < previous ? i : previous];
+        }
 
-        // Queue enter
-        int enter_delay = delay + GATE_CLOSE_DELAY_SEC + GATE_MOVE_DURATION_SEC + 2;
-        queue_event(cx, CX_EVENT_TRAIN_ENTER, dir, 0, enter_delay);
-
-        // Queue exit
-        int exit_delay = enter_delay + TRAIN_CROSSING_TIME_SEC;
-        queue_event(cx, CX_EVENT_TRAIN_EXIT, dir, 0, exit_delay);
+        queue_event(cx, CX_EVENT_TRAIN_APPROACH, dir, 0, arrive - sim.warning_sec);
+        queue_event(cx, CX_EVENT_TRAIN_ENTER, dir, 0, arrive);
+        queue_event(cx, CX_EVENT_TRAIN_EXIT, dir, 0, arrive + sim.train_length_sec);
     }
 }
 
@@ -436,18 +482,13 @@ static void simulate_train_on_line(cx_track_direction_t dir)
 // ============================================
 static void simulate_train_at_crossing(crossing_t *cx, cx_track_direction_t dir, bool no_exit)
 {
-    // APPROACH -> ENTER (after crossing time) -> EXIT (after crossing time)
+    // Warn now, enter when the front arrives, clear after the train's length
     queue_event(cx, CX_EVENT_TRAIN_APPROACH, dir, 0, 0);
-
-    // Train enters after gate close delay + gate close time + small margin
-    int enter_delay = GATE_CLOSE_DELAY_SEC + GATE_MOVE_DURATION_SEC + 2;
-    queue_event(cx, CX_EVENT_TRAIN_ENTER, dir, 0, enter_delay);
+    queue_event(cx, CX_EVENT_TRAIN_ENTER, dir, 0, sim.warning_sec);
 
     if (!no_exit)
     {
-        // Train exits after spending time on crossing
-        int exit_delay = enter_delay + TRAIN_CROSSING_TIME_SEC;
-        queue_event(cx, CX_EVENT_TRAIN_EXIT, dir, 0, exit_delay);
+        queue_event(cx, CX_EVENT_TRAIN_EXIT, dir, 0, sim.warning_sec + sim.train_length_sec);
     }
 }
 
@@ -656,12 +697,16 @@ static bool command_locked(const char *cmd, char *reply, size_t reply_len)
     if (strcmp(cmd, "status") == 0)
     {
         snprintf(reply, reply_len,
-                 "Sim: %s, Scale: x%d, Elapsed: %ds, Train UP: %s, Train DOWN: %s",
+                 "Sim: %s, Scale: x%d, Elapsed: %ds, Train UP: %s, Train DOWN: %s\n"
+                 "Layout: P1-P2 %ds, P2-P3 %ds, train length %ds, warning %ds%s",
                  sim.initialized ? "OK" : "NOT INIT",
                  sim.time_scale,
                  rail_sim_get_elapsed_sec(),
                  track_pending(CX_TRACK_UP) ? "RUNNING" : "IDLE",
-                 track_pending(CX_TRACK_DOWN) ? "RUNNING" : "IDLE");
+                 track_pending(CX_TRACK_DOWN) ? "RUNNING" : "IDLE",
+                 sim.distance_sec[0], sim.distance_sec[1],
+                 sim.train_length_sec, sim.warning_sec,
+                 sim.config_notice[0] ? " (refused config values replaced by defaults)" : "");
         return true;
     }
 
@@ -750,4 +795,21 @@ int rail_sim_snapshot(crossing_t *out, int max)
     unlock_sim();
 
     return count;
+}
+
+// ============================================
+// Track Layout
+// ============================================
+int rail_sim_get_warning_sec(void)
+{
+    lock_sim();
+    int warning = sim.warning_sec;
+    unlock_sim();
+    return warning;
+}
+
+const char *rail_sim_config_notice(void)
+{
+    // Written only by rail_sim_init, before other threads start
+    return sim.config_notice;
 }

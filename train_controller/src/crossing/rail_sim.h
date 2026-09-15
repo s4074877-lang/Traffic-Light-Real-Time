@@ -87,4 +87,15 @@ int rail_sim_get_elapsed_sec(void);
 // Returns: number of crossings copied
 int rail_sim_snapshot(crossing_t *out, int max);
 
+// ============================================
+// Track Layout (compile-time config, see crossing_config.h)
+// ============================================
+
+// Seconds before a train arrives that RAILWAY_PREEMPT is sent
+int rail_sim_get_warning_sec(void);
+
+// Config values refused at rail_sim_init and replaced by defaults,
+// or an empty string if every value was accepted
+const char *rail_sim_config_notice(void);
+
 #endif // RAIL_SIM_H
