@@ -14,12 +14,19 @@
 #include "crossing/crossing.h"
 #include "crossing/rail_sim.h"
 
+// Maximum preempt/clear/fault messages waiting for the sender thread
+#define OUTBOX_CAPACITY 64
+
+// Outbox destination for Central (Locals use intersection index 0..5)
+#define OUTBOX_CENTRAL (-1)
+
 // Controller state
 typedef struct
 {
     // Connections
     connection_t central_conn;
-    connection_t local_conn;
+    connection_t local_conns[NUM_INTERSECTIONS]; // traffic_local_I1..I6
+    connection_t legacy_local_conn;              // I1 published as LOCAL_SERVICE_NAME
     connection_mode_t mode;
 
     // Timestamps
@@ -36,9 +43,35 @@ typedef struct
     pthread_mutex_t mutex;
 } train_controller_state_t;
 
+// Message waiting to be delivered by the sender thread
+typedef struct
+{
+    int destination;       // Local intersection index 0..5, or OUTBOX_CENTRAL
+    size_t size;           // Bytes of msg to send
+    const char *type_name; // For the UI "last sent" line
+    union
+    {
+        msg_header_t header;
+        railway_full_msg_t railway;
+        fault_full_msg_t fault;
+    } msg;
+} outbox_item_t;
+
 static train_controller_state_t state;
 static train_ui_state_t ui_state;
 static name_attach_t *attach = NULL;
+
+// Crossing callbacks run under the simulator lock, so they only queue
+// messages here; the sender thread does the (timed) IPC.
+static struct
+{
+    outbox_item_t items[OUTBOX_CAPACITY];
+    int head;
+    int count;
+    int dropped;
+    pthread_mutex_t mutex;
+    pthread_cond_t ready;
+} outbox = {.mutex = PTHREAD_MUTEX_INITIALIZER, .ready = PTHREAD_COND_INITIALIZER};
 
 // Crossing state (P1, P2, P3)
 static crossing_t crossings[NUM_CROSSINGS];
@@ -54,7 +87,7 @@ static void cx_cancel_timer(crossing_t *cx, timer_id_t timer_id);
 static void cx_state_changed(crossing_t *cx);
 
 // Forward declaration for status sending
-static void send_railway_status(void);
+static void send_railway_status(const crossing_t *snapshot, int count);
 
 // Crossing operations callbacks
 static const cx_ops_t crossing_ops = {
@@ -111,12 +144,137 @@ static const char *msg_type_name(uint16_t type)
     }
 }
 
+// ============================================
+// Local Links (I1..I6)
+// ============================================
+
+// Connected link to Local intersection index 0..5, or NULL
+static connection_t *local_link(int index)
+{
+    if (connection_is_connected(&state.local_conns[index]))
+    {
+        return &state.local_conns[index];
+    }
+    if (index == 0 && connection_is_connected(&state.legacy_local_conn))
+    {
+        return &state.legacy_local_conn;
+    }
+    return NULL;
+}
+
+// The UI has a single LOCAL row: connected while any intersection is reachable
+static void update_local_ui_status(void)
+{
+    char timestamp[32];
+    int connected = 0;
+
+    for (int i = 0; i < NUM_INTERSECTIONS; i++)
+    {
+        if (local_link(i) != NULL)
+        {
+            connected++;
+        }
+    }
+
+    get_timestamp(timestamp, sizeof(timestamp));
+    train_ui_set_connection(&ui_state, CONTROLLER_LOCAL,
+                            connected > 0 ? CONN_CONNECTED : CONN_LOST, timestamp);
+}
+
+// ============================================
+// Outbox
+// ============================================
+
+static void outbox_push(const outbox_item_t *item)
+{
+    pthread_mutex_lock(&outbox.mutex);
+    if (outbox.count < OUTBOX_CAPACITY)
+    {
+        outbox.items[(outbox.head + outbox.count) % OUTBOX_CAPACITY] = *item;
+        outbox.count++;
+        pthread_cond_signal(&outbox.ready);
+    }
+    else
+    {
+        outbox.dropped++;
+    }
+    pthread_mutex_unlock(&outbox.mutex);
+}
+
+static void deliver(const outbox_item_t *item)
+{
+    char timestamp[32];
+    char dest[16];
+    connection_t *conn;
+    reply_t reply;
+
+    if (item->destination == OUTBOX_CENTRAL)
+    {
+        conn = connection_is_connected(&state.central_conn) ? &state.central_conn : NULL;
+        snprintf(dest, sizeof(dest), "CENTRAL");
+    }
+    else
+    {
+        conn = local_link(item->destination);
+        snprintf(dest, sizeof(dest), "LOCAL I%d", item->destination + 1);
+    }
+
+    if (conn == NULL)
+    {
+        return; // Not connected; the connection thread will retry the link
+    }
+
+    get_timestamp(timestamp, sizeof(timestamp));
+    if (send_message_timeout(conn, &item->msg, item->size, &reply, SEND_TIMEOUT_MS) != 0)
+    {
+        if (item->destination == OUTBOX_CENTRAL)
+        {
+            train_ui_set_connection(&ui_state, CONTROLLER_CENTRAL, CONN_LOST, timestamp);
+        }
+        else
+        {
+            update_local_ui_status();
+        }
+        return;
+    }
+
+    train_ui_set_last_sent(&ui_state, timestamp, item->type_name, dest);
+}
+
+// Thread to deliver queued messages without blocking the simulator
+static void *sender_thread(void *arg)
+{
+    (void)arg;
+
+    while (1)
+    {
+        outbox_item_t item;
+
+        pthread_mutex_lock(&outbox.mutex);
+        while (outbox.count == 0)
+        {
+            pthread_cond_wait(&outbox.ready, &outbox.mutex);
+        }
+        item = outbox.items[outbox.head];
+        outbox.head = (outbox.head + 1) % OUTBOX_CAPACITY;
+        outbox.count--;
+        pthread_mutex_unlock(&outbox.mutex);
+
+        deliver(&item);
+    }
+
+    return NULL;
+}
+
 // Handler for test messages
 static int handle_test_message(int rcvid, test_message_t *msg, reply_t *reply, void *ctx)
 {
     (void)rcvid;
     train_controller_state_t *s = (train_controller_state_t *)ctx;
     char timestamp[32];
+    char command[sizeof(msg->data)];
+
+    command[0] = '\0';
 
     pthread_mutex_lock(&s->mutex);
 
@@ -127,13 +285,9 @@ static int handle_test_message(int rcvid, test_message_t *msg, reply_t *reply, v
         // Update UI state
         train_ui_set_connection(&ui_state, CONTROLLER_CENTRAL, CONN_CONNECTED, s->last_central_update);
 
-        // Process command if present in data
-        if (msg->data[0] != '\0')
-        {
-            char cmd_reply[256];
-            rail_sim_command(msg->data, cmd_reply, sizeof(cmd_reply));
-            // Log the command execution (could display on UI)
-        }
+        // Command present in data is run after releasing the mutex
+        memcpy(command, msg->data, sizeof(command));
+        command[sizeof(command) - 1] = '\0';
     }
     else if (msg->header.src == CONTROLLER_LOCAL)
     {
@@ -151,6 +305,13 @@ static int handle_test_message(int rcvid, test_message_t *msg, reply_t *reply, v
 
     s->ui_needs_update = 1;
     pthread_mutex_unlock(&s->mutex);
+
+    // The simulator has its own lock
+    if (command[0] != '\0')
+    {
+        char cmd_reply[256];
+        rail_sim_command(command, cmd_reply, sizeof(cmd_reply));
+    }
 
     reply->status = 0;
     get_timestamp(reply->timestamp, sizeof(reply->timestamp));
@@ -194,21 +355,37 @@ static void *connection_thread(void *arg)
             train_ui_set_last_sent(&ui_state, timestamp, "TEST", "CENTRAL");
         }
 
-        // Try connecting to local
-        if (connection_try_connect(&state.local_conn))
+        // Try connecting to each Local intersection
+        for (int i = 0; i < NUM_INTERSECTIONS; i++)
         {
-            pthread_mutex_lock(&state.mutex);
-            get_timestamp(state.last_local_update, sizeof(state.last_local_update));
-            state.ui_needs_update = 1;
-            pthread_mutex_unlock(&state.mutex);
+            connection_t *conn = &state.local_conns[i];
+            int newly_connected = connection_try_connect(conn);
 
-            // Update UI state
-            get_timestamp(timestamp, sizeof(timestamp));
-            train_ui_set_connection(&ui_state, CONTROLLER_LOCAL, CONN_CONNECTED, timestamp);
+            // I1 may still run under the legacy service name
+            if (!newly_connected && i == 0 && !connection_is_connected(conn))
+            {
+                conn = &state.legacy_local_conn;
+                newly_connected = connection_try_connect(conn);
+            }
 
-            // Send initial message to notify local we're connected
-            send_test_message(&state.local_conn, CONTROLLER_TRAIN, CONTROLLER_LOCAL);
-            train_ui_set_last_sent(&ui_state, timestamp, "TEST", "LOCAL");
+            if (newly_connected)
+            {
+                char dest[16];
+
+                pthread_mutex_lock(&state.mutex);
+                get_timestamp(state.last_local_update, sizeof(state.last_local_update));
+                state.ui_needs_update = 1;
+                pthread_mutex_unlock(&state.mutex);
+
+                // Update UI state
+                get_timestamp(timestamp, sizeof(timestamp));
+                update_local_ui_status();
+
+                // Send initial message to notify local we're connected
+                send_test_message(conn, CONTROLLER_TRAIN, CONTROLLER_LOCAL);
+                snprintf(dest, sizeof(dest), "LOCAL I%d", i + 1);
+                train_ui_set_last_sent(&ui_state, timestamp, "TEST", dest);
+            }
         }
 
         sleep(2);
@@ -274,46 +451,52 @@ static void *heartbeat_thread(void *arg)
             // No update on successful heartbeat - only state changes matter
         }
 
-        // Check local connection
-        if (connection_is_connected(&state.local_conn))
+        // Check each Local connection
+        for (int i = 0; i < NUM_INTERSECTIONS; i++)
         {
-            if (send_heartbeat(&state.local_conn, CONTROLLER_TRAIN, CONTROLLER_LOCAL) != 0)
+            connection_t *conn = local_link(i);
+
+            if (conn != NULL && send_heartbeat(conn, CONTROLLER_TRAIN, CONTROLLER_LOCAL) != 0)
             {
                 pthread_mutex_lock(&state.mutex);
                 get_timestamp(state.last_local_update, sizeof(state.last_local_update));
                 state.ui_needs_update = 1;
                 pthread_mutex_unlock(&state.mutex);
 
-                // Connection lost - update UI (timestamp updated only on state change)
-                get_timestamp(timestamp, sizeof(timestamp));
-                train_ui_set_connection(&ui_state, CONTROLLER_LOCAL, CONN_LOST, timestamp);
+                // Link lost - LOCAL row shows lost only when no Local remains
+                update_local_ui_status();
             }
-            // No update on successful heartbeat - only state changes matter
         }
     }
 
     return NULL;
 }
 
-// Thread to tick the simulator and send periodic status
+// Thread to tick the simulator (never blocks on IPC)
 static void *sim_tick_thread(void *arg)
 {
     (void)arg;
-    int status_counter = 0;
 
     while (1)
     {
-        // Tick simulator every SIM_TICK_MS
         usleep(SIM_TICK_MS * 1000);
         rail_sim_tick();
+    }
 
-        // Send status to Central every STATUS_REPORT_INTERVAL_SEC
-        status_counter++;
-        if (status_counter >= (STATUS_REPORT_INTERVAL_SEC * 1000 / SIM_TICK_MS))
-        {
-            send_railway_status();
-            status_counter = 0;
-        }
+    return NULL;
+}
+
+// Thread to send periodic railway status to Central
+static void *status_thread(void *arg)
+{
+    (void)arg;
+    crossing_t snapshot[NUM_CROSSINGS];
+
+    while (1)
+    {
+        sleep(STATUS_REPORT_INTERVAL_SEC);
+        int count = rail_sim_snapshot(snapshot, NUM_CROSSINGS);
+        send_railway_status(snapshot, count);
     }
 
     return NULL;
@@ -322,6 +505,7 @@ static void *sim_tick_thread(void *arg)
 // ============================================
 // Crossing Callback Implementations
 // ============================================
+// These run under the simulator lock: they must only queue IPC, never send.
 
 static void cx_gate_command(crossing_t *cx, gate_command_t cmd)
 {
@@ -342,36 +526,44 @@ static void cx_set_flash(crossing_t *cx, bool on)
     }
 }
 
+// Queue a PREEMPT or CLEAR for both Local intersections next to this crossing
+static void queue_railway_message(const crossing_t *cx, msg_type_t type)
+{
+    const uint8_t locals[] = {cx->local_id_1, cx->local_id_2};
+
+    for (size_t i = 0; i < sizeof(locals) / sizeof(locals[0]); i++)
+    {
+        if (locals[i] < 1 || locals[i] > NUM_INTERSECTIONS)
+        {
+            continue;
+        }
+
+        outbox_item_t item;
+        memset(&item, 0, sizeof(item));
+        item.destination = locals[i] - 1;
+        item.size = sizeof(item.msg.railway);
+        item.type_name = type == MSG_RAILWAY_PREEMPT ? "PREEMPT" : "CLEAR";
+
+        item.msg.railway.header.type = type;
+        item.msg.railway.header.src = CONTROLLER_TRAIN;
+        item.msg.railway.header.dst = CONTROLLER_LOCAL;
+        get_timestamp(item.msg.railway.header.timestamp, sizeof(item.msg.railway.header.timestamp));
+        // Local matches on the crossing ID (1..3), not its own intersection ID
+        item.msg.railway.payload.intersection_id = cx->id;
+        item.msg.railway.payload.active = type == MSG_RAILWAY_PREEMPT ? 1 : 0;
+        item.msg.railway.payload.eta_seconds = type == MSG_RAILWAY_PREEMPT ? GATE_CLOSE_DELAY_SEC + 5 : 0;
+
+        outbox_push(&item);
+    }
+}
+
 static void cx_send_preempt(crossing_t *cx)
 {
     char timestamp[32];
     get_timestamp(timestamp, sizeof(timestamp));
 
-    // Send RAILWAY_PREEMPT to Local controller
-    if (connection_is_connected(&state.local_conn))
-    {
-        // Build and send railway preempt message
-        railway_full_msg_t msg;
-        memset(&msg, 0, sizeof(msg));
-        msg.header.type = MSG_RAILWAY_PREEMPT;
-        msg.header.src = CONTROLLER_TRAIN;
-        msg.header.dst = CONTROLLER_LOCAL;
-        get_timestamp(msg.header.timestamp, sizeof(msg.header.timestamp));
-        msg.payload.intersection_id = cx->id;
-        msg.payload.active = 1;
-        msg.payload.eta_seconds = GATE_CLOSE_DELAY_SEC + 5;
-
-        reply_t reply;
-        if (MsgSend(state.local_conn.coid, &msg, sizeof(msg), &reply, sizeof(reply)) == -1)
-        {
-            // Connection lost
-            train_ui_set_connection(&ui_state, CONTROLLER_LOCAL, CONN_LOST, timestamp);
-        }
-        else
-        {
-            train_ui_set_last_sent(&ui_state, timestamp, "PREEMPT", "LOCAL");
-        }
-    }
+    // Send RAILWAY_PREEMPT to both affected Local controllers
+    queue_railway_message(cx, MSG_RAILWAY_PREEMPT);
 
     // Update UI with preempt time
     train_ui_set_preempt_time(&ui_state, cx->id - 1, timestamp);
@@ -382,29 +574,8 @@ static void cx_send_clear(crossing_t *cx)
     char timestamp[32];
     get_timestamp(timestamp, sizeof(timestamp));
 
-    // Send TRAIN_CLEAR to Local controller
-    if (connection_is_connected(&state.local_conn))
-    {
-        railway_full_msg_t msg;
-        memset(&msg, 0, sizeof(msg));
-        msg.header.type = MSG_TRAIN_CLEAR;
-        msg.header.src = CONTROLLER_TRAIN;
-        msg.header.dst = CONTROLLER_LOCAL;
-        get_timestamp(msg.header.timestamp, sizeof(msg.header.timestamp));
-        msg.payload.intersection_id = cx->id;
-        msg.payload.active = 0;
-        msg.payload.eta_seconds = 0;
-
-        reply_t reply;
-        if (MsgSend(state.local_conn.coid, &msg, sizeof(msg), &reply, sizeof(reply)) == -1)
-        {
-            train_ui_set_connection(&ui_state, CONTROLLER_LOCAL, CONN_LOST, timestamp);
-        }
-        else
-        {
-            train_ui_set_last_sent(&ui_state, timestamp, "CLEAR", "LOCAL");
-        }
-    }
+    // Send TRAIN_CLEAR to both affected Local controllers
+    queue_railway_message(cx, MSG_TRAIN_CLEAR);
 
     // Update UI with clear time
     train_ui_set_clear_time(&ui_state, cx->id - 1, timestamp);
@@ -412,34 +583,24 @@ static void cx_send_clear(crossing_t *cx)
 
 static void cx_fault_alert(crossing_t *cx, cx_fault_t fault)
 {
-    char timestamp[32];
-    get_timestamp(timestamp, sizeof(timestamp));
-
     // Send FAULT_ALERT to Central
-    if (connection_is_connected(&state.central_conn))
-    {
-        fault_full_msg_t msg;
-        memset(&msg, 0, sizeof(msg));
-        msg.header.type = MSG_FAULT_ALERT;
-        msg.header.src = CONTROLLER_TRAIN;
-        msg.header.dst = CONTROLLER_CENTRAL;
-        get_timestamp(msg.header.timestamp, sizeof(msg.header.timestamp));
-        msg.payload.source_id = cx->id;
-        msg.payload.fault_type = FAULT_GATE;
-        msg.payload.severity = SEV_CRITICAL;
-        snprintf(msg.payload.description, sizeof(msg.payload.description), "%s: %s",
-                 cx->name, cx_fault_str(fault));
+    outbox_item_t item;
+    memset(&item, 0, sizeof(item));
+    item.destination = OUTBOX_CENTRAL;
+    item.size = sizeof(item.msg.fault);
+    item.type_name = "FAULT";
 
-        reply_t reply;
-        if (MsgSend(state.central_conn.coid, &msg, sizeof(msg), &reply, sizeof(reply)) == -1)
-        {
-            train_ui_set_connection(&ui_state, CONTROLLER_CENTRAL, CONN_LOST, timestamp);
-        }
-        else
-        {
-            train_ui_set_last_sent(&ui_state, timestamp, "FAULT", "CENTRAL");
-        }
-    }
+    item.msg.fault.header.type = MSG_FAULT_ALERT;
+    item.msg.fault.header.src = CONTROLLER_TRAIN;
+    item.msg.fault.header.dst = CONTROLLER_CENTRAL;
+    get_timestamp(item.msg.fault.header.timestamp, sizeof(item.msg.fault.header.timestamp));
+    item.msg.fault.payload.source_id = cx->id;
+    item.msg.fault.payload.fault_type = FAULT_GATE;
+    item.msg.fault.payload.severity = SEV_CRITICAL;
+    snprintf(item.msg.fault.payload.description, sizeof(item.msg.fault.payload.description), "%s: %s",
+             cx->name, cx_fault_str(fault));
+
+    outbox_push(&item);
 
     // Update UI fault count
     int fault_count = 0;
@@ -512,8 +673,8 @@ static void cx_state_changed(crossing_t *cx)
     }
 }
 
-// Send railway status to Central (called periodically)
-static void send_railway_status(void)
+// Send railway status to Central (called periodically with a crossing snapshot)
+static void send_railway_status(const crossing_t *snapshot, int count)
 {
     char timestamp[32];
     get_timestamp(timestamp, sizeof(timestamp));
@@ -523,9 +684,9 @@ static void send_railway_status(void)
         return;
     }
 
-    for (int i = 0; i < NUM_CROSSINGS; i++)
+    for (int i = 0; i < count; i++)
     {
-        crossing_t *cx = &crossings[i];
+        const crossing_t *cx = &snapshot[i];
 
         railway_status_full_msg_t msg;
         memset(&msg, 0, sizeof(msg));
@@ -557,7 +718,11 @@ static void send_railway_status(void)
         msg.payload.fault = (cx->fault != CX_FAULT_NONE) ? FAULT_GATE : FAULT_NONE;
 
         reply_t reply;
-        MsgSend(state.central_conn.coid, &msg, sizeof(msg), &reply, sizeof(reply));
+        if (send_message_timeout(&state.central_conn, &msg, sizeof(msg), &reply, SEND_TIMEOUT_MS) != 0)
+        {
+            train_ui_set_connection(&ui_state, CONTROLLER_CENTRAL, CONN_LOST, timestamp);
+            return;
+        }
     }
 
     train_ui_set_last_sent(&ui_state, timestamp, "RLY_STATUS", "CENTRAL");
@@ -599,32 +764,34 @@ static int execute_command(const char *cmd)
     }
     else if (strcmp(cmd, "send-local") == 0)
     {
+        int sent = 0;
+
+        // Send to every connected Local intersection
+        for (int i = 0; i < NUM_INTERSECTIONS; i++)
+        {
+            connection_t *conn = local_link(i);
+            if (conn != NULL && send_test_message(conn, CONTROLLER_TRAIN, CONTROLLER_LOCAL) == 0)
+            {
+                sent++;
+            }
+        }
+
+        if (sent == 0)
+        {
+            printf("%sNo Local controller connected%s\n", COLOR_RED, COLOR_RESET);
+            update_local_ui_status();
+            return -1;
+        }
+
         pthread_mutex_lock(&state.mutex);
-        int connected = state.local_conn.connected;
+        get_timestamp(state.last_send_local, sizeof(state.last_send_local));
+        state.ui_needs_update = 1;
         pthread_mutex_unlock(&state.mutex);
 
-        if (!connected)
-        {
-            printf("%sLocal controller not connected%s\n", COLOR_RED, COLOR_RESET);
-            return -1;
-        }
-
-        if (send_test_message(&state.local_conn, CONTROLLER_TRAIN, CONTROLLER_LOCAL) == 0)
-        {
-            pthread_mutex_lock(&state.mutex);
-            get_timestamp(state.last_send_local, sizeof(state.last_send_local));
-            state.ui_needs_update = 1;
-            pthread_mutex_unlock(&state.mutex);
-
-            // Update UI state
-            get_timestamp(timestamp, sizeof(timestamp));
-            train_ui_set_last_sent(&ui_state, timestamp, "TEST", "LOCAL");
-        }
-        else
-        {
-            printf("%sFailed to send message%s\n", COLOR_RED, COLOR_RESET);
-            return -1;
-        }
+        // Update UI state
+        get_timestamp(timestamp, sizeof(timestamp));
+        train_ui_set_last_sent(&ui_state, timestamp, "TEST", "LOCAL");
+        printf("%sTest message sent to %d Local controller(s)%s\n", COLOR_GREEN, sent, COLOR_RESET);
     }
     else
     {
@@ -671,8 +838,29 @@ int main(int argc, char *argv[])
     pthread_mutex_init(&state.mutex, NULL);
     state.mode = mode;
     state.ui_needs_update = 1;
-    connection_init(&state.central_conn, CENTRAL_SERVICE_NAME, mode, &state.mutex);
-    connection_init(&state.local_conn, LOCAL_SERVICE_NAME, mode, &state.mutex);
+    if (mode == CONN_MODE_GLOBAL) {
+        // Global mode: connect to remote VMs via /net/{vm}/dev/name/local/
+        connection_init_remote(&state.central_conn, CENTRAL_SERVICE_NAME,
+                               VM3_CENTRAL_NAME, &state.mutex);
+        for (int i = 0; i < NUM_INTERSECTIONS; i++)
+        {
+            char name[64];
+            snprintf(name, sizeof(name), "%s%d", LOCAL_INTERSECTION_SERVICE_PREFIX, i + 1);
+            connection_init_remote(&state.local_conns[i], name, VM1_LOCAL_NAME, &state.mutex);
+        }
+        connection_init_remote(&state.legacy_local_conn, LOCAL_SERVICE_NAME,
+                               VM1_LOCAL_NAME, &state.mutex);
+    } else {
+        // Local mode: connect via /dev/name/local/
+        connection_init(&state.central_conn, CENTRAL_SERVICE_NAME, mode, &state.mutex);
+        for (int i = 0; i < NUM_INTERSECTIONS; i++)
+        {
+            char name[64];
+            snprintf(name, sizeof(name), "%s%d", LOCAL_INTERSECTION_SERVICE_PREFIX, i + 1);
+            connection_init(&state.local_conns[i], name, mode, &state.mutex);
+        }
+        connection_init(&state.legacy_local_conn, LOCAL_SERVICE_NAME, mode, &state.mutex);
+    }
 
     // Initialize UI state
     train_ui_init(&ui_state);
@@ -699,7 +887,7 @@ int main(int argc, char *argv[])
                  sizeof(handlers) / sizeof(handlers[0]), &state);
 
     // Start threads
-    pthread_t msg_thread, conn_thread, ui_thread, hb_thread, sim_thread;
+    pthread_t msg_thread, conn_thread, ui_thread, hb_thread, sim_thread, send_thread, stat_thread;
 
     if (pthread_create(&msg_thread, NULL, message_handler_thread, &recv_ctx) != 0)
     {
@@ -725,9 +913,21 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
+    if (pthread_create(&send_thread, NULL, sender_thread, NULL) != 0)
+    {
+        fprintf(stderr, "Failed to create sender thread\n");
+        return EXIT_FAILURE;
+    }
+
     if (pthread_create(&sim_thread, NULL, sim_tick_thread, NULL) != 0)
     {
         fprintf(stderr, "Failed to create simulator tick thread\n");
+        return EXIT_FAILURE;
+    }
+
+    if (pthread_create(&stat_thread, NULL, status_thread, NULL) != 0)
+    {
+        fprintf(stderr, "Failed to create status thread\n");
         return EXIT_FAILURE;
     }
 
@@ -812,7 +1012,11 @@ int main(int argc, char *argv[])
     // Cleanup
     rail_sim_destroy();
     connection_close(&state.central_conn);
-    connection_close(&state.local_conn);
+    for (int i = 0; i < NUM_INTERSECTIONS; i++)
+    {
+        connection_close(&state.local_conns[i]);
+    }
+    connection_close(&state.legacy_local_conn);
     connection_unregister_service(attach);
     pthread_mutex_destroy(&state.mutex);
     train_ui_destroy(&ui_state);

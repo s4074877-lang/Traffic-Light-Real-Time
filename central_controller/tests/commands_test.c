@@ -172,9 +172,9 @@ int main(void) {
     memcpy(&coordination, message.data, sizeof(coordination));
     require(coordination.phase == PHASE_NS_GREEN && coordination.mode == MODE_FIXED &&
             coordination.cycle_offset_sec == 0, "Start of coordination cycle");
-    message = expect_command("coordinate all EW 43", INTERSECTION_ALL, MSG_COORDINATION_COMMAND);
+    message = expect_command("coordinate all EW 63", INTERSECTION_ALL, MSG_COORDINATION_COMMAND);
     memcpy(&coordination, message.data, sizeof(coordination));
-    require(coordination.phase == PHASE_EW_GREEN && coordination.cycle_offset_sec == 43,
+    require(coordination.phase == PHASE_EW_GREEN && coordination.cycle_offset_sec == 63,
             "Last valid coordination offset");
 
     unsigned char before[sizeof(message)];
@@ -187,7 +187,7 @@ int main(void) {
     require(central_command_id(&message) == UINT16_MAX && central_command_target(&message) == I6,
             "Full command ID and target ranges");
     memcpy(&coordination, message.data, sizeof(coordination));
-    require(coordination.phase == PHASE_EW_GREEN && coordination.cycle_offset_sec == 43,
+    require(coordination.phase == PHASE_EW_GREEN && coordination.cycle_offset_sec == 63,
             "Helpers preserve the command parameters");
 
     const char *invalid[] = {
@@ -200,7 +200,7 @@ int main(void) {
         "mode-temp I1 sensor 1.0", "mode-temp I1 sensor 1e2", "mode-temp I1 sensor 1s",
         "mode-temp I1 sensor 99999999999999999999999999999999999",
         "mode-revert", "mode-revert I1 extra", "coordinate I1 NS",
-        "coordinate I1 NS 44", "coordinate I1 NS -1", "coordinate I1 NS +1",
+        "coordinate I1 NS 64", "coordinate I1 NS -1", "coordinate I1 NS +1",
         "coordinate I1 NS 0.5", "coordinate I1 ns 1", "coordinate I1 RED 1",
         "coordinate I9 EW 0", "coordinate I1 NS 0 extra",
         "override I1 NS 10", "release all",

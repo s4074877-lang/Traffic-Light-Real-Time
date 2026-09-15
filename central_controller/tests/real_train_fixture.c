@@ -3,9 +3,11 @@
  * connect a fixture Central to a production Train or Local service. */
 #include "../../common/common.h"
 #undef LOCAL_SERVICE_NAME
+#undef LOCAL_INTERSECTION_SERVICE_PREFIX
 #undef TRAIN_SERVICE_NAME
 #undef CENTRAL_SERVICE_NAME
 #define LOCAL_SERVICE_NAME "traffic_test_central_only_local"
+#define LOCAL_INTERSECTION_SERVICE_PREFIX "traffic_test_central_only_local_I"
 #define TRAIN_SERVICE_NAME "traffic_test_central_only_train"
 #define CENTRAL_SERVICE_NAME "traffic_test_central_only"
 #include "../../train_controller/src/train_controller.c"

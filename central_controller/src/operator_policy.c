@@ -98,7 +98,7 @@ int central_parse_train_command(const char *line,
                parse_crossing(tokens[1], &crossing)) {
         snprintf(canonical, sizeof(canonical), "%s P%u", tokens[0], crossing);
     } else if (count == 2 && strcmp(tokens[0], "test") == 0 &&
-               parse_unsigned(tokens[1], 1, 7, &value)) {
+               parse_unsigned(tokens[1], 1, 9, &value)) {
         snprintf(canonical, sizeof(canonical), "test %u", value);
     } else if (count == 2 && strcmp(tokens[0], "scale") == 0 &&
                parse_unsigned(tokens[1], 1, 100, &value)) {

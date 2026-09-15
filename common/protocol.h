@@ -27,6 +27,11 @@
 #define PED_WALK_START_SEC  1  // Starts this many seconds after Green
 #define PED_WALK_END_SEC    5  // Ends this many seconds before Yellow
 
+// Longest fixed cycle a Local can run (both greens at GREEN_MAX_SEC).
+// Coordination offsets must be below this; each Local still rejects an
+// offset beyond its own configured cycle.
+#define COORDINATION_MAX_CYCLE_SEC (2 * (GREEN_MAX_SEC + YELLOW_SEC))
+
 #define SENSOR_CAR_THRESHOLD 5  // >= 5 cars = high demand
 #define SENSOR_ADJUST_SEC    5  // add to busy phase, remove from other
 

@@ -106,8 +106,12 @@ static const char *test_names[] = {
     "Intersections Sense Crossing State (No Control Over Gate)",
     "Gate Fault - Train Gets Red Light",
     "Gate Fault - Error Reported to Control Room",
-    "Train Line Controller Communicates with Central"
+    "Train Line Controller Communicates with Central",
+    "Train Approaches While Gate Opening - No Early CLEAR",
+    "Train Timeout Tracked Per Direction"
 };
+
+#define TEST_COUNT 9
 
 // ============================================
 // Test 1: Boom Gates Close and Flashing Lights On
@@ -329,6 +333,83 @@ static bool test_7_communicate_with_central(void) {
 }
 
 // ============================================
+// Test 8: Train Approaches While Gate Opening
+// (A new train must abort the opening; no CLEAR while it is approaching)
+// ============================================
+static bool test_8_approach_while_gate_opening(void) {
+    reset_test_state();
+    crossing_t cx = create_test_crossing();
+
+    // First train passes; gate starts opening
+    crossing_handle_event(&cx, CX_EVENT_TRAIN_APPROACH, CX_TRACK_UP, 0);
+    uint32_t gen = cx.timer_gen[TIMER_GATE_CLOSE_DELAY];
+    crossing_handle_event(&cx, CX_EVENT_TIMER, (cx_track_direction_t)TIMER_GATE_CLOSE_DELAY, gen);
+    crossing_handle_event(&cx, CX_EVENT_GATE_CLOSED, CX_TRACK_UP, 0);
+    crossing_handle_event(&cx, CX_EVENT_TRAIN_ENTER, CX_TRACK_UP, 0);
+    crossing_handle_event(&cx, CX_EVENT_TRAIN_EXIT, CX_TRACK_UP, 0);
+    if (cx.gate != GATE_OPENING) return false;
+    uint32_t open_gen = cx.timer_gen[TIMER_GATE_OPEN_TIMEOUT];
+
+    // Second train approaches before the gate is fully open
+    crossing_handle_event(&cx, CX_EVENT_TRAIN_APPROACH, CX_TRACK_DOWN, 0);
+    if (cx.gate != GATE_CLOSING) return false;
+
+    // A late "opened" and the old open timeout must be ignored
+    crossing_handle_event(&cx, CX_EVENT_GATE_OPENED, CX_TRACK_UP, 0);
+    crossing_handle_event(&cx, CX_EVENT_TIMER, (cx_track_direction_t)TIMER_GATE_OPEN_TIMEOUT, open_gen);
+    if (test_state.clear_sent) return false;
+    if (cx.fault != CX_FAULT_NONE) return false;
+
+    // Second train passes normally, then CLEAR is sent
+    crossing_handle_event(&cx, CX_EVENT_GATE_CLOSED, CX_TRACK_UP, 0);
+    crossing_handle_event(&cx, CX_EVENT_TRAIN_ENTER, CX_TRACK_DOWN, 0);
+    crossing_handle_event(&cx, CX_EVENT_TRAIN_EXIT, CX_TRACK_DOWN, 0);
+    crossing_handle_event(&cx, CX_EVENT_GATE_OPENED, CX_TRACK_UP, 0);
+    if (!test_state.clear_sent || cx.gate != GATE_OPEN) return false;
+
+    // Gate finishing opening with a train still approaching: close, no CLEAR
+    reset_test_state();
+    cx = create_test_crossing();
+    cx.gate = GATE_OPENING;
+    cx.track[CX_TRACK_DOWN] = CX_TRACK_APPROACHING;
+    crossing_handle_event(&cx, CX_EVENT_GATE_OPENED, CX_TRACK_UP, 0);
+    if (test_state.clear_sent) return false;
+    if (cx.gate != GATE_CLOSING) return false;
+
+    return true;
+}
+
+// ============================================
+// Test 9: Train Timeout Tracked Per Direction
+// (A train leaving one track must not cancel the other track's timeout)
+// ============================================
+static bool test_9_train_timeout_per_direction(void) {
+    reset_test_state();
+    crossing_t cx = create_test_crossing();
+
+    crossing_handle_event(&cx, CX_EVENT_TRAIN_APPROACH, CX_TRACK_UP, 0);
+    crossing_handle_event(&cx, CX_EVENT_TRAIN_APPROACH, CX_TRACK_DOWN, 0);
+    uint32_t gen = cx.timer_gen[TIMER_GATE_CLOSE_DELAY];
+    crossing_handle_event(&cx, CX_EVENT_TIMER, (cx_track_direction_t)TIMER_GATE_CLOSE_DELAY, gen);
+    crossing_handle_event(&cx, CX_EVENT_GATE_CLOSED, CX_TRACK_UP, 0);
+    crossing_handle_event(&cx, CX_EVENT_TRAIN_ENTER, CX_TRACK_UP, 0);
+    crossing_handle_event(&cx, CX_EVENT_TRAIN_ENTER, CX_TRACK_DOWN, 0);
+
+    // UP train leaves; DOWN train's timeout must still be live
+    uint32_t down_gen = cx.timer_gen[TIMER_TRAIN_TIMEOUT_DOWN];
+    crossing_handle_event(&cx, CX_EVENT_TRAIN_EXIT, CX_TRACK_UP, 0);
+    if (cx.timer_gen[TIMER_TRAIN_TIMEOUT_DOWN] != down_gen) return false;
+    if (cx.gate != GATE_CLOSED) return false;
+
+    // DOWN train never leaves: its timeout raises the fault
+    crossing_handle_event(&cx, CX_EVENT_TIMER, (cx_track_direction_t)TIMER_TRAIN_TIMEOUT_DOWN, down_gen);
+    if (cx.fault != CX_FAULT_TRAIN_TIMEOUT) return false;
+    if (test_state.last_fault != CX_FAULT_TRAIN_TIMEOUT) return false;
+
+    return true;
+}
+
+// ============================================
 // Run Tests
 // ============================================
 typedef bool (*test_func_t)(void);
@@ -341,22 +422,24 @@ static test_func_t tests[] = {
     test_4_intersections_sense_state,
     test_5_gate_fault_train_red,
     test_6_gate_fault_reported,
-    test_7_communicate_with_central
+    test_7_communicate_with_central,
+    test_8_approach_while_gate_opening,
+    test_9_train_timeout_per_direction
 };
 
 int crossing_test_count(void) {
-    return 7;
+    return TEST_COUNT;
 }
 
 const char *crossing_test_name(int test_num) {
-    if (test_num >= 1 && test_num <= 7) {
+    if (test_num >= 1 && test_num <= TEST_COUNT) {
         return test_names[test_num];
     }
     return "Unknown";
 }
 
 bool crossing_test_run_single(int test_num, char *reply, size_t reply_len) {
-    if (test_num < 1 || test_num > 7) {
+    if (test_num < 1 || test_num > TEST_COUNT) {
         snprintf(reply, reply_len, "ERROR: Invalid test number %d", test_num);
         return false;
     }
@@ -369,10 +452,10 @@ bool crossing_test_run_single(int test_num, char *reply, size_t reply_len) {
 
 bool crossing_test_run_all(char *reply, size_t reply_len) {
     int passed = 0;
-    int failed[7];
+    int failed[TEST_COUNT];
     int fail_count = 0;
 
-    for (int i = 1; i <= 7; i++) {
+    for (int i = 1; i <= TEST_COUNT; i++) {
         if (tests[i]()) {
             passed++;
         } else {
@@ -381,7 +464,7 @@ bool crossing_test_run_all(char *reply, size_t reply_len) {
     }
 
     if (fail_count == 0) {
-        snprintf(reply, reply_len, "TESTS: %d/%d PASS", passed, 7);
+        snprintf(reply, reply_len, "TESTS: %d/%d PASS", passed, TEST_COUNT);
     } else {
         char fail_str[64] = "";
         for (int i = 0; i < fail_count; i++) {
@@ -389,7 +472,7 @@ bool crossing_test_run_all(char *reply, size_t reply_len) {
             snprintf(buf, sizeof(buf), "%s%d", i > 0 ? ", " : "", failed[i]);
             strncat(fail_str, buf, sizeof(fail_str) - strlen(fail_str) - 1);
         }
-        snprintf(reply, reply_len, "TESTS: %d/%d PASS, failed: %s", passed, 7, fail_str);
+        snprintf(reply, reply_len, "TESTS: %d/%d PASS, failed: %s", passed, TEST_COUNT, fail_str);
     }
 
     return fail_count == 0;

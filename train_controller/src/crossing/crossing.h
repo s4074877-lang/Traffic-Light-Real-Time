@@ -77,10 +77,16 @@ typedef enum
     TIMER_GATE_CLOSE_DELAY = 0,   // Delay before starting gate close
     TIMER_GATE_CLOSE_TIMEOUT = 1, // Timeout waiting for gate to close
     TIMER_GATE_OPEN_TIMEOUT = 2,  // Timeout waiting for gate to open
-    TIMER_TRAIN_TIMEOUT = 3       // Timeout waiting for train to exit
+    TIMER_TRAIN_TIMEOUT_UP = 3,   // Timeout waiting for UP train to exit
+    TIMER_TRAIN_TIMEOUT_DOWN = 4  // Timeout waiting for DOWN train to exit
 } timer_id_t;
 
-#define NUM_TIMERS 4
+#define NUM_TIMERS 5
+
+// Each track has its own train timeout, so a train leaving one track never
+// cancels the timeout of a train still on the other track
+#define TRAIN_TIMEOUT_TIMER(dir) \
+    ((dir) == CX_TRACK_DOWN ? TIMER_TRAIN_TIMEOUT_DOWN : TIMER_TRAIN_TIMEOUT_UP)
 
 // Forward declaration
 struct crossing_t;
@@ -132,6 +138,7 @@ typedef struct crossing_t
     bool flash_on;                      // Road flashing lights
     cx_fault_t fault;                   // Current fault (CX_FAULT_NONE if OK)
     bool reset_pending;                 // True if gate should open after close (reset sequence)
+    bool close_delay_pending;           // True while TIMER_GATE_CLOSE_DELAY is running
 
     // Timer generation counters (to ignore stale timer events)
     uint32_t timer_gen[NUM_TIMERS];

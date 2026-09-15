@@ -35,7 +35,7 @@ $(OUTPUT_DIR)/global_transport_test: global_transport_test.c $(IPC_SOURCES) $(IP
 	$(CC) $(CFLAGS) -o $@ global_transport_test.c $(IPC_SOURCES)
 
 $(OUTPUT_DIR)/central_fixture: ../src/central_controller.c ../src/monitor.c ../src/monitor.h $(IPC_SOURCES) $(IPC_HEADERS) $(COMMON_HEADERS) $(CORE_EXTRA) $(CORE_HEADERS) | $(OUTPUT_DIR)
-	$(CC) $(CFLAGS) -DCENTRAL_SERVICE=\"traffic_test_central_only\" -DCENTRAL_LOCAL_SERVICE=\"traffic_test_central_only_local\" -DCENTRAL_TRAIN_SERVICE=\"traffic_test_central_only_train\" -o $@ ../src/central_controller.c ../src/monitor.c $(IPC_SOURCES) $(CORE_EXTRA)
+	$(CC) $(CFLAGS) -DCENTRAL_SERVICE=\"traffic_test_central_only\" -DCENTRAL_LOCAL_SERVICE=\"traffic_test_central_only_local\" -DCENTRAL_LOCAL_SERVICE_PREFIX=\"traffic_test_central_only_local_I\" -DCENTRAL_TRAIN_SERVICE=\"traffic_test_central_only_train\" -o $@ ../src/central_controller.c ../src/monitor.c $(IPC_SOURCES) $(CORE_EXTRA)
 
 $(OUTPUT_DIR)/operator_policy_test: operator_policy_test.c ../src/operator_policy.c ../src/operator_policy.h $(COMMON_HEADERS) | $(OUTPUT_DIR)
 	$(CC) $(CFLAGS) -o $@ operator_policy_test.c ../src/operator_policy.c

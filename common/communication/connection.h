@@ -28,6 +28,13 @@ typedef struct {
 void connection_init(connection_t *conn, const char *service_name,
                      connection_mode_t mode, pthread_mutex_t *mutex);
 
+// Initialize connection for remote VM (global mode)
+// service_name: just the name (e.g., "traffic_local_controller")
+// remote_vm: the VM name (e.g., "vm1_local_intersection")
+// Builds path: /net/{remote_vm}/dev/name/local/{service_name}
+void connection_init_remote(connection_t *conn, const char *service_name,
+                            const char *remote_vm, pthread_mutex_t *mutex);
+
 // Try to establish connection (non-blocking, call in loop)
 // Returns: 1 if newly connected, 0 if already connected or failed
 int connection_try_connect(connection_t *conn);

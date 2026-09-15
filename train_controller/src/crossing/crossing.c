@@ -33,6 +33,7 @@ void crossing_init(crossing_t *cx, uint8_t id, const char *name,
     cx->flash_on = false;
     cx->fault = CX_FAULT_NONE;
     cx->reset_pending = false;
+    cx->close_delay_pending = false;
 
     for (int i = 0; i < NUM_TIMERS; i++)
     {
@@ -77,6 +78,7 @@ static void enter_fault(crossing_t *cx, cx_fault_t fault)
 {
     cx->fault = fault;
     cx->gate = GATE_FAULT;
+    cx->close_delay_pending = false;
 
     // Keep flash on
     if (!cx->flash_on)
@@ -118,7 +120,18 @@ static void start_gate_close(crossing_t *cx)
 {
     if (cx->gate == GATE_OPEN || cx->gate == GATE_OPENING)
     {
+        // Abort an opening in progress so its timeout cannot raise a fault
+        if (cx->gate == GATE_OPENING)
+        {
+            cx->timer_gen[TIMER_GATE_OPEN_TIMEOUT]++;
+            if (cx->ops->cancel_timer)
+            {
+                cx->ops->cancel_timer(cx, TIMER_GATE_OPEN_TIMEOUT);
+            }
+        }
+
         cx->gate = GATE_CLOSING;
+        cx->close_delay_pending = false;
 
         if (cx->ops->gate_command)
         {
@@ -147,6 +160,7 @@ static void start_gate_open(crossing_t *cx)
     if (cx->gate == GATE_CLOSED || cx->gate == GATE_CLOSING)
     {
         cx->gate = GATE_OPENING;
+        cx->close_delay_pending = false;
 
         // Cancel any pending close delay timer to prevent interference
         cx->timer_gen[TIMER_GATE_CLOSE_DELAY]++;
@@ -214,14 +228,21 @@ void crossing_handle_event(crossing_t *cx, crossing_event_t event,
             }
             get_timestamp(cx->preempt_time, sizeof(cx->preempt_time));
 
-            // Start gate close delay timer (if gate not already closing/closed)
-            if (cx->gate == GATE_OPEN)
+            if (cx->gate == GATE_OPEN && !cx->close_delay_pending)
             {
+                // Start the close delay once; a second approach must not
+                // restart it and postpone closing for the first train
+                cx->close_delay_pending = true;
                 cx->timer_gen[TIMER_GATE_CLOSE_DELAY]++;
                 if (cx->ops->start_timer)
                 {
                     cx->ops->start_timer(cx, TIMER_GATE_CLOSE_DELAY, GATE_CLOSE_DELAY_SEC);
                 }
+            }
+            else if (cx->gate == GATE_OPENING)
+            {
+                // New train before the previous CLEAR: abort opening, close now
+                start_gate_close(cx);
             }
 
             if (cx->ops->state_changed)
@@ -246,11 +267,12 @@ void crossing_handle_event(crossing_t *cx, crossing_event_t event,
 
             cx->track[dir] = CX_TRACK_ON_CROSSING;
 
-            // Start train timeout timer
-            cx->timer_gen[TIMER_TRAIN_TIMEOUT]++;
+            // Start train timeout timer for this direction
+            timer_id_t timeout = TRAIN_TIMEOUT_TIMER(dir);
+            cx->timer_gen[timeout]++;
             if (cx->ops->start_timer)
             {
-                cx->ops->start_timer(cx, TIMER_TRAIN_TIMEOUT, TRAIN_TIMEOUT_SEC);
+                cx->ops->start_timer(cx, timeout, TRAIN_TIMEOUT_SEC);
             }
 
             if (cx->ops->state_changed)
@@ -268,11 +290,13 @@ void crossing_handle_event(crossing_t *cx, crossing_event_t event,
         {
             cx->track[dir] = CX_TRACK_CLEARED;
 
-            // Cancel train timeout for this direction
-            cx->timer_gen[TIMER_TRAIN_TIMEOUT]++;
+            // Cancel train timeout for this direction only; a train on the
+            // other track keeps its own timeout running
+            timer_id_t timeout = TRAIN_TIMEOUT_TIMER(dir);
+            cx->timer_gen[timeout]++;
             if (cx->ops->cancel_timer)
             {
-                cx->ops->cancel_timer(cx, TIMER_TRAIN_TIMEOUT);
+                cx->ops->cancel_timer(cx, timeout);
             }
 
             // If both tracks clear, start opening gate
@@ -342,6 +366,14 @@ void crossing_handle_event(crossing_t *cx, crossing_event_t event,
                 cx->ops->cancel_timer(cx, TIMER_GATE_OPEN_TIMEOUT);
             }
 
+            // Only send CLEAR when both directions are clear; otherwise a train
+            // is approaching, so close again and keep preemption active
+            if (!crossing_both_tracks_clear(cx))
+            {
+                start_gate_close(cx);
+                break;
+            }
+
             // Turn off flashing lights
             cx->flash_on = false;
             if (cx->ops->set_flash)
@@ -372,7 +404,7 @@ void crossing_handle_event(crossing_t *cx, crossing_event_t event,
         timer_id_t timer_id = (timer_id_t)dir;
 
         // Verify the generation matches for this specific timer
-        if (timer_gen != cx->timer_gen[timer_id])
+        if ((unsigned)timer_id >= NUM_TIMERS || timer_gen != cx->timer_gen[timer_id])
         {
             // Stale timer, ignore
             break;
@@ -383,6 +415,7 @@ void crossing_handle_event(crossing_t *cx, crossing_event_t event,
         {
         case TIMER_GATE_CLOSE_DELAY:
             // Gate close delay expired - start closing
+            cx->close_delay_pending = false;
             start_gate_close(cx);
             break;
         case TIMER_GATE_CLOSE_TIMEOUT:
@@ -393,7 +426,8 @@ void crossing_handle_event(crossing_t *cx, crossing_event_t event,
             // Gate took too long to open
             enter_fault(cx, CX_FAULT_GATE_OPEN_TIMEOUT);
             break;
-        case TIMER_TRAIN_TIMEOUT:
+        case TIMER_TRAIN_TIMEOUT_UP:
+        case TIMER_TRAIN_TIMEOUT_DOWN:
             // Train never exited
             enter_fault(cx, CX_FAULT_TRAIN_TIMEOUT);
             break;

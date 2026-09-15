@@ -4,8 +4,11 @@
 #include "../../common/common.h"
 #include <pthread.h>
 
+#ifndef CENTRAL_LOCAL_SERVICE_PREFIX
+#define CENTRAL_LOCAL_SERVICE_PREFIX LOCAL_INTERSECTION_SERVICE_PREFIX
+#endif
 #ifndef CENTRAL_LOCAL_SERVICE
-#define CENTRAL_LOCAL_SERVICE LOCAL_SERVICE_NAME
+#define CENTRAL_LOCAL_SERVICE LOCAL_INTERSECTION_SERVICE_PREFIX "1"
 #endif
 #ifndef CENTRAL_TRAIN_SERVICE
 #define CENTRAL_TRAIN_SERVICE TRAIN_SERVICE_NAME
@@ -34,6 +37,9 @@ typedef struct {
 } central_link_t;
 
 int central_link_init(central_link_t *link, const char *name, central_ipc_mode_t mode);
+// Initialize link for remote VM (global mode)
+// Builds path: /net/{remote_vm}/dev/name/local/{name}
+int central_link_init_remote(central_link_t *link, const char *name, const char *remote_vm);
 // Returns 1 for a newly established connection, 0 otherwise. May wait up to 500 ms.
 int central_link_connect(central_link_t *link);
 int central_link_is_connected(central_link_t *link);

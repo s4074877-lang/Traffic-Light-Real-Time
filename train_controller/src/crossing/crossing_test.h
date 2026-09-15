@@ -18,6 +18,8 @@
 // 5. Gate Fault - Train Gets Red Light
 // 6. Gate Fault - Error Reported to Control Room
 // 7. Train Line Controller Communicates with Central
+// 8. Train Approaches While Gate Opening - No Early CLEAR
+// 9. Train Timeout Tracked Per Direction
 
 // Run all tests
 // reply: buffer for result message
@@ -26,7 +28,7 @@
 bool crossing_test_run_all(char *reply, size_t reply_len);
 
 // Run a single test
-// test_num: test number (1-7)
+// test_num: test number (1..crossing_test_count())
 // reply: buffer for result message
 // reply_len: size of reply buffer
 // Returns: true if test passed

@@ -15,8 +15,14 @@
 
 #include "protocol.h"
 
+// VM names for distributed mode (used with /net/{vm}/dev/name/local/)
+#define VM1_LOCAL_NAME          "vm1_local_intersection"
+#define VM2_TRAIN_NAME          "vm2_train_controller"
+#define VM3_CENTRAL_NAME        "vm3_central_controller"
+
 // Service names for name service
 #define LOCAL_SERVICE_NAME      "traffic_local_controller"
+#define LOCAL_INTERSECTION_SERVICE_PREFIX "traffic_local_I"  // + 1..6 -> traffic_local_I1..I6
 #define TRAIN_SERVICE_NAME      "traffic_train_controller"
 #define CENTRAL_SERVICE_NAME    "traffic_central_controller"
 

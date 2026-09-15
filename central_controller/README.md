@@ -69,7 +69,7 @@ is `/tmp/central_controller.log`; select a writable persistent path when needed.
 | `mode-sensor [I1..I6\|all]` | Request sensor-driven operation |
 | `mode-temp I1 fixed 20` | Temporary mode, 1–65535 seconds |
 | `mode-revert I1` | Cancel temporary mode, preserving persistent operator intent |
-| `coordinate I1 NS 3` | Request NS/EW coordination with offset 0–43 seconds |
+| `coordinate I1 NS 3` | Request NS/EW coordination with offset 0–63 seconds (Local rejects an offset beyond its own cycle) |
 | `coordinate-at 10 all NS 3` | Dispatch coordination after 1–3600 seconds |
 | `sim-start I1` | Request Local traffic generation; requires the Local `SIM1` handler |
 | `sim-stop I1` | Request stopping traffic generation while the controller continues |

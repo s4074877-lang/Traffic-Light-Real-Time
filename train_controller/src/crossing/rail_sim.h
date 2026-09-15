@@ -11,6 +11,10 @@
 // Simulates train movement and gate mechanics.
 // Provides test commands for manual and automated testing.
 // All timing is scaled by the time_scale factor.
+//
+// Thread safety: every function takes the simulator lock, which also guards
+// the crossings passed to rail_sim_init. Crossing callbacks run while that
+// lock is held, so they must not block (no IPC).
 
 // ============================================
 // Initialization
@@ -78,5 +82,9 @@ bool rail_sim_is_busy(void);
 
 // Get simulation elapsed time in seconds (scaled)
 int rail_sim_get_elapsed_sec(void);
+
+// Copy up to max crossings into out under the simulator lock
+// Returns: number of crossings copied
+int rail_sim_snapshot(crossing_t *out, int max);
 
 #endif // RAIL_SIM_H

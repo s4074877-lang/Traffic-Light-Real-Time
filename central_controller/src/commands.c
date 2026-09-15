@@ -223,7 +223,7 @@ int central_parse_command(const char *line, test_message_t *message, unsigned *t
         mode.action = CMD_REVERT;
         memcpy(command.data, &mode, sizeof(mode));
     } else if (strcmp(tokens[0], "coordinate") == 0) {
-        unsigned cycle_seconds = 2 * (GREEN_BASE_SEC + YELLOW_SEC);
+        unsigned cycle_seconds = COORDINATION_MAX_CYCLE_SEC;
         if (count != 4 || !parse_target(tokens[1], &selected_target) ||
             !parse_number(tokens[3], 0, cycle_seconds - 1, &seconds) ||
             !parse_phase(tokens[2], &coordination.phase)) {

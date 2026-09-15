@@ -140,7 +140,7 @@ int central_frame_valid(const test_message_t *message, size_t size,
                 target_valid(value.intersection_id) && value.mode == MODE_FIXED &&
                 (value.phase == PHASE_NS_GREEN || value.phase == PHASE_EW_GREEN) &&
                 value.reserved == 0 && value.command_id != 0 &&
-                value.cycle_offset_sec < 2 * (GREEN_BASE_SEC + YELLOW_SEC);
+                value.cycle_offset_sec < COORDINATION_MAX_CYCLE_SEC;
         }
         default:
             return 0;
@@ -364,24 +364,19 @@ static void *link_worker(void *argument) {
     return NULL;
 }
 
-int central_link_init(central_link_t *link, const char *name, central_ipc_mode_t mode) {
-    if (link == NULL || name == NULL || *name == '\0' ||
-        (mode != CENTRAL_IPC_LOCAL && mode != CENTRAL_IPC_GLOBAL)) {
-        errno = EINVAL;
-        return -1;
-    }
+static int central_link_init_internal(central_link_t *link, const char *path) {
     link->state = NULL;
     central_link_state_t *state = calloc(1, sizeof(*state));
     if (state == NULL) {
         return -1;
     }
-    state->name = strdup(name);
+    state->name = strdup(path);
     if (state->name == NULL) {
         free(state);
         return -1;
     }
     state->coid = -1;
-    state->flags = mode == CENTRAL_IPC_GLOBAL ? NAME_FLAG_ATTACH_GLOBAL : 0;
+    state->flags = 0;  // Always use local namespace now
     int error = pthread_mutex_init(&state->mutex, NULL);
     if (error != 0) {
         free(state->name);
@@ -413,6 +408,27 @@ int central_link_init(central_link_t *link, const char *name, central_ipc_mode_t
     }
     link->state = state;
     return 0;
+}
+
+int central_link_init(central_link_t *link, const char *name, central_ipc_mode_t mode) {
+    if (link == NULL || name == NULL || *name == '\0' ||
+        (mode != CENTRAL_IPC_LOCAL && mode != CENTRAL_IPC_GLOBAL)) {
+        errno = EINVAL;
+        return -1;
+    }
+    return central_link_init_internal(link, name);
+}
+
+int central_link_init_remote(central_link_t *link, const char *name, const char *remote_vm) {
+    char path[256];
+    if (link == NULL || name == NULL || *name == '\0' ||
+        remote_vm == NULL || *remote_vm == '\0') {
+        errno = EINVAL;
+        return -1;
+    }
+    // Build path: /net/{remote_vm}/dev/name/local/{name}
+    snprintf(path, sizeof(path), "/net/%s/dev/name/local/%s", remote_vm, name);
+    return central_link_init_internal(link, path);
 }
 
 static int run_job(central_link_t *link, central_job_t job,
@@ -593,8 +609,10 @@ int central_receiver_init(central_receiver_t *receiver, const char *name,
         errno = error;
         return -1;
     }
-    unsigned flags = mode == CENTRAL_IPC_GLOBAL ? NAME_FLAG_ATTACH_GLOBAL : 0;
-    receiver->attach = name_attach(dispatch, name, flags);
+    // Always register in local namespace
+    // For global mode, other VMs connect via /net/{this_vm}/dev/name/local/{service}
+    (void)mode;
+    receiver->attach = name_attach(dispatch, name, 0);
     if (receiver->attach == NULL) {
         error = errno;
         dispatch_destroy(dispatch);

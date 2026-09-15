@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include <time.h>
+#include <pthread.h>
 
 // ============================================
 // Event Queue Entry
@@ -50,6 +51,34 @@ static struct
 
 // Gate movement duration (scaled simulation seconds to ms)
 #define GATE_MOVE_DURATION_SEC 3
+
+// ============================================
+// Simulator Lock
+// ============================================
+// Serializes the tick, console and IPC threads. Recursive because crossing
+// callbacks re-enter the simulator (gate commands and timers).
+static pthread_mutex_t sim_mutex;
+static pthread_once_t sim_mutex_once = PTHREAD_ONCE_INIT;
+
+static void create_sim_mutex(void)
+{
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&sim_mutex, &attr);
+    pthread_mutexattr_destroy(&attr);
+}
+
+static void lock_sim(void)
+{
+    pthread_once(&sim_mutex_once, create_sim_mutex);
+    pthread_mutex_lock(&sim_mutex);
+}
+
+static void unlock_sim(void)
+{
+    pthread_mutex_unlock(&sim_mutex);
+}
 
 // ============================================
 // Internal: Convert real seconds to sim ms
@@ -114,6 +143,8 @@ static bool queue_event(crossing_t *cx, crossing_event_t event,
 // ============================================
 void rail_sim_init(crossing_t *crossings, int num_crossings, int time_scale)
 {
+    lock_sim();
+
     memset(&sim, 0, sizeof(sim));
 
     sim.crossings = crossings;
@@ -128,6 +159,8 @@ void rail_sim_init(crossing_t *crossings, int num_crossings, int time_scale)
         sim.gates[i].stuck = false;
         sim.gates[i].move_complete_ms = -1;
     }
+
+    unlock_sim();
 }
 
 // ============================================
@@ -135,13 +168,15 @@ void rail_sim_init(crossing_t *crossings, int num_crossings, int time_scale)
 // ============================================
 void rail_sim_destroy(void)
 {
+    lock_sim();
     sim.initialized = false;
+    unlock_sim();
 }
 
 // ============================================
 // Tick
 // ============================================
-int rail_sim_tick(void)
+static int tick_locked(void)
 {
     if (!sim.initialized)
         return 0;
@@ -220,24 +255,30 @@ int rail_sim_tick(void)
     return processed;
 }
 
+int rail_sim_tick(void)
+{
+    lock_sim();
+    int processed = tick_locked();
+    unlock_sim();
+    return processed;
+}
+
 // ============================================
 // Gate Command (from crossing logic)
 // ============================================
 void rail_sim_gate_command(crossing_t *cx, gate_command_t cmd)
 {
-    if (!sim.initialized || cx->id < 1 || cx->id > 3)
-        return;
+    (void)cmd;
+    lock_sim();
 
-    int idx = cx->id - 1;
-
-    if (sim.gates[idx].stuck)
+    // A stuck gate won't complete its movement
+    if (sim.initialized && cx->id >= 1 && cx->id <= 3 && !sim.gates[cx->id - 1].stuck)
     {
-        // Gate is stuck, won't complete movement
-        return;
+        // Schedule gate movement completion
+        sim.gates[cx->id - 1].move_complete_ms = sim.sim_time_ms + sec_to_sim_ms(GATE_MOVE_DURATION_SEC);
     }
 
-    // Schedule gate movement completion
-    sim.gates[idx].move_complete_ms = sim.sim_time_ms + sec_to_sim_ms(GATE_MOVE_DURATION_SEC);
+    unlock_sim();
 }
 
 // ============================================
@@ -245,17 +286,23 @@ void rail_sim_gate_command(crossing_t *cx, gate_command_t cmd)
 // ============================================
 void rail_sim_start_timer(crossing_t *cx, timer_id_t timer_id, int seconds)
 {
-    if (!sim.initialized)
-        return;
+    lock_sim();
 
-    uint32_t gen = cx->timer_gen[timer_id];
-    // Use queue_event_ex to include timer_id in the event
-    // This prevents stale timers from being misinterpreted as different timer types
-    queue_event_ex(cx, CX_EVENT_TIMER, CX_TRACK_UP, gen, timer_id, seconds);
+    if (sim.initialized)
+    {
+        uint32_t gen = cx->timer_gen[timer_id];
+        // Use queue_event_ex to include timer_id in the event
+        // This prevents stale timers from being misinterpreted as different timer types
+        queue_event_ex(cx, CX_EVENT_TIMER, CX_TRACK_UP, gen, timer_id, seconds);
+    }
+
+    unlock_sim();
 }
 
 void rail_sim_cancel_timer(crossing_t *cx, timer_id_t timer_id)
 {
+    lock_sim();
+
     // Timers are cancelled by incrementing generation in crossing.c
     // But we also need to deactivate the queued event to clear the busy flag
     for (int i = 0; i < MAX_PENDING_EVENTS; i++)
@@ -269,6 +316,8 @@ void rail_sim_cancel_timer(crossing_t *cx, timer_id_t timer_id)
             sim.events[i].active = false;
         }
     }
+
+    unlock_sim();
 }
 
 // ============================================
@@ -309,7 +358,7 @@ static void simulate_train_at_crossing(crossing_t *cx, cx_track_direction_t dir,
 // ============================================
 // Command Handler
 // ============================================
-bool rail_sim_command(const char *cmd, char *reply, size_t reply_len)
+static bool command_locked(const char *cmd, char *reply, size_t reply_len)
 {
     if (!sim.initialized)
     {
@@ -516,11 +565,11 @@ bool rail_sim_command(const char *cmd, char *reply, size_t reply_len)
     if (strncmp(cmd, "test ", 5) == 0)
     {
         int n = atoi(cmd + 5);
-        if (n >= 1 && n <= 7)
+        if (n >= 1 && n <= crossing_test_count())
         {
             return crossing_test_run_single(n, reply, reply_len);
         }
-        snprintf(reply, reply_len, "ERROR: Test number must be 1-7");
+        snprintf(reply, reply_len, "ERROR: Test number must be 1-%d", crossing_test_count());
         return false;
     }
 
@@ -563,10 +612,11 @@ bool rail_sim_command(const char *cmd, char *reply, size_t reply_len)
                  "  p#-fault       - Inject fault (e.g., p1-fault)\n"
                  "  reset P#       - Reset fault and unstick gate\n"
                  "  test           - Run all requirement tests\n"
-                 "  test N         - Run single test (1-7)\n"
+                 "  test N         - Run single test (1-%d)\n"
                  "  scale N        - Set time scale (1-100)\n"
                  "  status         - Show simulator status\n"
-                 "  help           - Show this help");
+                 "  help           - Show this help",
+                 crossing_test_count());
         return true;
     }
 
@@ -574,19 +624,32 @@ bool rail_sim_command(const char *cmd, char *reply, size_t reply_len)
     return false;
 }
 
+bool rail_sim_command(const char *cmd, char *reply, size_t reply_len)
+{
+    lock_sim();
+    bool result = command_locked(cmd, reply, reply_len);
+    unlock_sim();
+    return result;
+}
+
 // ============================================
 // Time Scale
 // ============================================
 int rail_sim_get_time_scale(void)
 {
-    return sim.time_scale;
+    lock_sim();
+    int scale = sim.time_scale;
+    unlock_sim();
+    return scale;
 }
 
 void rail_sim_set_time_scale(int scale)
 {
     if (scale >= 1 && scale <= 100)
     {
+        lock_sim();
         sim.time_scale = scale;
+        unlock_sim();
     }
 }
 
@@ -595,10 +658,31 @@ void rail_sim_set_time_scale(int scale)
 // ============================================
 bool rail_sim_is_busy(void)
 {
-    return sim.busy;
+    lock_sim();
+    bool busy = sim.busy;
+    unlock_sim();
+    return busy;
 }
 
 int rail_sim_get_elapsed_sec(void)
 {
-    return (int)(sim.sim_time_ms / 1000);
+    lock_sim();
+    int elapsed = (int)(sim.sim_time_ms / 1000);
+    unlock_sim();
+    return elapsed;
+}
+
+int rail_sim_snapshot(crossing_t *out, int max)
+{
+    int count = 0;
+
+    lock_sim();
+    if (sim.initialized)
+    {
+        count = sim.num_crossings < max ? sim.num_crossings : max;
+        memcpy(out, sim.crossings, (size_t)count * sizeof(*out));
+    }
+    unlock_sim();
+
+    return count;
 }

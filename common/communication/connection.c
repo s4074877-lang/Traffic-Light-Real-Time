@@ -4,7 +4,6 @@
 #include <getopt.h>
 
 #define LOCAL_NAME_PREFIX  "/dev/name/local/"
-#define GLOBAL_NAME_PREFIX "/dev/name/global/"
 
 void connection_init(connection_t *conn, const char *service_name,
                      connection_mode_t mode, pthread_mutex_t *mutex) {
@@ -18,9 +17,25 @@ void connection_init(connection_t *conn, const char *service_name,
     strncpy(conn->service_name, service_name, sizeof(conn->service_name) - 1);
     conn->service_name[sizeof(conn->service_name) - 1] = '\0';
 
-    // Build full path based on mode
-    const char *prefix = (mode == CONN_MODE_LOCAL) ? LOCAL_NAME_PREFIX : GLOBAL_NAME_PREFIX;
-    snprintf(conn->service_path, sizeof(conn->service_path), "%s%s", prefix, service_name);
+    // Build full path - use local namespace
+    snprintf(conn->service_path, sizeof(conn->service_path), "%s%s", LOCAL_NAME_PREFIX, service_name);
+}
+
+void connection_init_remote(connection_t *conn, const char *service_name,
+                            const char *remote_vm, pthread_mutex_t *mutex) {
+    conn->coid = -1;
+    conn->connected = 0;
+    conn->connection_msg_printed = 0;
+    conn->mode = CONN_MODE_GLOBAL;
+    conn->mutex = mutex;
+
+    // Store service name
+    strncpy(conn->service_name, service_name, sizeof(conn->service_name) - 1);
+    conn->service_name[sizeof(conn->service_name) - 1] = '\0';
+
+    // Build full path using remote VM: /net/{vm}/dev/name/local/{service}
+    snprintf(conn->service_path, sizeof(conn->service_path),
+             "/net/%s/dev/name/local/%s", remote_vm, service_name);
 }
 
 int connection_try_connect(connection_t *conn) {
@@ -72,24 +87,19 @@ int connection_get_coid(connection_t *conn) {
 }
 
 name_attach_t* connection_register_service(const char *service_name, connection_mode_t mode) {
-    int flags = (mode == CONN_MODE_GLOBAL) ? NAME_FLAG_ATTACH_GLOBAL : 0;
-
-    name_attach_t *attach = name_attach(NULL, service_name, flags);
+    // Always register in LOCAL namespace
+    // For global mode, other VMs connect via /net/{this_vm}/dev/name/local/{service}
+    name_attach_t *attach = name_attach(NULL, service_name, 0);
     if (attach == NULL) {
         fprintf(stderr, "Failed to register with name service: %s\n", strerror(errno));
-        if (mode == CONN_MODE_GLOBAL) {
-            fprintf(stderr, "For global mode, make sure GNS is running:\n");
-            fprintf(stderr, "  Central VM: gns -s\n");
-            fprintf(stderr, "  Other VMs:  gns -c /net/<central-vm>/dev/name/gns\n");
-        }
         return NULL;
     }
 
-    const char *prefix = (mode == CONN_MODE_LOCAL) ? LOCAL_NAME_PREFIX : GLOBAL_NAME_PREFIX;
-    printf("Registered as '%s' in %s namespace\n",
-           service_name,
-           (mode == CONN_MODE_LOCAL) ? "local" : "global");
-    printf("Accessible via: %s%s\n", prefix, service_name);
+    printf("Registered as '%s' in local namespace\n", service_name);
+    printf("Local access: %s%s\n", LOCAL_NAME_PREFIX, service_name);
+    if (mode == CONN_MODE_GLOBAL) {
+        printf("Remote access: /net/{this_vm}/dev/name/local/%s\n", service_name);
+    }
     fflush(stdout);
 
     return attach;
@@ -102,7 +112,7 @@ void connection_unregister_service(name_attach_t *attach) {
 }
 
 connection_mode_t connection_parse_args(int argc, char *argv[]) {
-    connection_mode_t mode = CONN_MODE_GLOBAL;  // Default to global
+    connection_mode_t mode = CONN_MODE_LOCAL;  // Default to local
     int opt;
 
     // Reset getopt

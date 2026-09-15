@@ -212,10 +212,10 @@ static void print_help(void) {
            "  mode-revert <I1..I6|all>\n"
            "  sim-start <I1..I6|all> | sim-stop <I1..I6|all>\n"
            "  sim-time <I1..I6|all> <HH:MM>\n"
-           "  coordinate <I1..I6|all> <NS|EW> <offset 0..43>\n"
-           "  coordinate-at <delay 1..3600s> <I1..I6|all> <NS|EW> <offset 0..43>\n"
+           "  coordinate <I1..I6|all> <NS|EW> <offset 0..63>\n"
+           "  coordinate-at <delay 1..3600s> <I1..I6|all> <NS|EW> <offset 0..63>\n"
            "  train-cmd <train-up|train-down|train P# up/down|noexit P# up/down>\n"
-           "  train-cmd <stuck P#|reset P#|test [1..7]|scale 1..100|status>\n"
+           "  train-cmd <stuck P#|reset P#|test [1..9]|scale 1..100|status>\n"
            "  schedule | schedule-resume <I1..I6|all> | version\n"
            "  status | commands | faults | events | help | quit\n"
            "  watch  (live status; press Enter to return to the prompt)\n"
@@ -950,7 +950,7 @@ static void execute_command(char *line) {
         errno = 0; delay = strtoul(line + 14, &end, 10);
         if (errno || line[14] < '0' || line[14] > '9' || *end != ' ' || delay < 1 || delay > 3600) {
             command_result = -1;
-            output("Invalid dispatch delay; use coordinate-at 1..3600 I# NS|EW 0..43\n");
+            output("Invalid dispatch delay; use coordinate-at 1..3600 I# NS|EW 0..63\n");
         } else {
             snprintf(parsed, sizeof(parsed), "coordinate %s", end + 1);
             if (!central_parse_command(parsed, &message, &target)) { command_result = -1; output("Invalid coordination arguments\n"); }
@@ -1004,12 +1004,13 @@ static int ui_command(const char *request, char *response, size_t capacity, void
 }
 
 int main(int argc, char *argv[]) {
-    central_ipc_mode_t mode = CENTRAL_IPC_GLOBAL;
+    central_ipc_mode_t mode = CENTRAL_IPC_LOCAL;
     const char *log_path = "/tmp/central_controller.log";
     central_receiver_t receiver;
     central_ui_server_t ui_server = {0};
     const char *schedule_path = NULL;
     const char *services[MAX_PEERS] = {CENTRAL_LOCAL_SERVICE, CENTRAL_TRAIN_SERVICE};
+    char default_local[NUM_INTERSECTIONS][64];
     unsigned route[NUM_INTERSECTIONS] = {0}, configured[NUM_INTERSECTIONS] = {0}, peer_count = 2;
     pthread_condattr_t attributes;
     sigset_t shutdown_signals;
@@ -1076,6 +1077,15 @@ int main(int argc, char *argv[]) {
         }
         else { fprintf(stderr, "Unknown or incomplete option: %s\n", argv[i]); return EXIT_FAILURE; }
     }
+    /* The Local launcher publishes one comm endpoint per intersection. */
+    for (i = 1; i < NUM_INTERSECTIONS; ++i) {
+        unsigned peer;
+        if (configured[i]) continue;
+        snprintf(default_local[i], sizeof(default_local[i]), "%s%d", CENTRAL_LOCAL_SERVICE_PREFIX, i + 1);
+        for (peer = 0; peer < peer_count; ++peer) if (!strcmp(services[peer], default_local[i])) break;
+        if (peer == peer_count) services[peer_count++] = default_local[i];
+        route[i] = peer;
+    }
     if (schedule_path) {
         char error[256];
         if (!central_schedule_load(schedule_path, &daily_schedule, error, sizeof(error))) {
@@ -1109,7 +1119,16 @@ int main(int argc, char *argv[]) {
     pthread_condattr_destroy(&attributes);
     state.running = 1;
     for (i = 0; i < (int)peer_count; ++i) {
-        if (central_link_init(&state.links[i], services[i], mode) != 0) goto cleanup;
+        int init_result;
+        if (mode == CENTRAL_IPC_GLOBAL) {
+            // Global mode: connect to remote VMs via /net/{vm}/dev/name/local/
+            const char *remote_vm = (i == 1) ? VM2_TRAIN_NAME : VM1_LOCAL_NAME;
+            init_result = central_link_init_remote(&state.links[i], services[i], remote_vm);
+        } else {
+            // Local mode: connect via /dev/name/local/
+            init_result = central_link_init(&state.links[i], services[i], mode);
+        }
+        if (init_result != 0) goto cleanup;
         ++initialized_links;
     }
     state.log_file = fopen(log_path, "a");

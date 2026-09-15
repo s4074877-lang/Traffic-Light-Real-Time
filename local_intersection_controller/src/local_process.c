@@ -25,21 +25,43 @@ name_attach_t *attach_service(const char *name, int global) {
     int chid = ChannelCreate(_NTO_CHF_DISCONNECT);
     dispatch_t *dispatch;
     name_attach_t *attach;
+    (void)global; // Always use local namespace now
     if (chid == -1) return NULL;
     dispatch = dispatch_create_channel(chid, 0);
     if (!dispatch) {
         ChannelDestroy(chid);
         return NULL;
     }
-    attach = name_attach(dispatch, name, global ? NAME_FLAG_ATTACH_GLOBAL : 0);
+    // Always register in local namespace
+    // For global mode, other VMs connect via /net/{this_vm}/dev/name/local/{service}
+    attach = name_attach(dispatch, name, 0);
     if (!attach) dispatch_destroy(dispatch);
     return attach;
 }
 
 int open_service(const char *name, int global) {
     int coid;
+    char path[256];
     if (timeout_send() == -1) return -1;
-    coid = name_open(name, global ? NAME_FLAG_ATTACH_GLOBAL : 0);
+    if (global) {
+        // Global mode: connect via /net/{vm}/dev/name/local/{service}
+        const char *remote_vm = NULL;
+        if (strcmp(name, CENTRAL_SERVICE_NAME) == 0) {
+            remote_vm = VM3_CENTRAL_NAME;
+        } else if (strcmp(name, TRAIN_SERVICE_NAME) == 0) {
+            remote_vm = VM2_TRAIN_NAME;
+        }
+        if (remote_vm) {
+            snprintf(path, sizeof(path), "/net/%s/dev/name/local/%s", remote_vm, name);
+            coid = name_open(path, 0);
+        } else {
+            // Unknown service, try local
+            coid = name_open(name, 0);
+        }
+    } else {
+        // Local mode: connect via /dev/name/local/
+        coid = name_open(name, 0);
+    }
     TimerTimeout(CLOCK_MONOTONIC, 0, NULL, NULL, NULL);
     return coid;
 }
