@@ -58,7 +58,10 @@ static void default_service_name(uint8_t intersection_id, int explicit_id,
 }
 
 static void print_usage(const char *prog) {
-    printf("Usage: %s [-l | -g] [-i I1..I6] [-n service]\n", prog);
+    printf("Usage: %s [-l | -g] [-i I1..I6] [-n service] [--role core|comm|io|display|ui]\n", prog);
+    printf("  --role  Separate process responsibility; no role/ID/name starts all Local processes\n");
+    printf("  --all   Show I1..I6 together with --role display (standard service names)\n");
+    printf("  --role ui  Interactive view switching and input; starts with all intersections\n");
     printf("  -l  Local mode (single VM testing)\n");
     printf("  -g  Global mode (multi VM with GNS) [default]\n");
     printf("  -i  Runtime intersection ID for this Local instance\n");
@@ -71,17 +74,10 @@ int main(int argc, char *argv[]) {
     connection_mode_t mode = CONN_MODE_GLOBAL;
     uint8_t intersection_id = LOCAL_INTERSECTION_ID;
     int explicit_intersection = 0;
+    int display_all = 0;
     char service_name[LOCAL_SERVICE_NAME_MAX];
     const char *service_arg = NULL;
-    name_attach_t *attach = NULL;
-    receive_context_t recv_ctx;
-    pthread_t msg_thread;
-    pthread_t conn_thread;
-    pthread_t ui_thread;
-    pthread_t hb_thread;
-    pthread_t traffic_thread_id;
-    pthread_t status_thread_id;
-    char cmd[64];
+    const char *role = NULL;
     int i;
 
     for (i = 1; i < argc; i++) {
@@ -92,6 +88,10 @@ int main(int argc, char *argv[]) {
             mode = CONN_MODE_LOCAL;
         } else if (strcmp(argv[i], "-g") == 0) {
             mode = CONN_MODE_GLOBAL;
+        } else if (strcmp(argv[i], "--role") == 0 && i + 1 < argc) {
+            role = argv[++i];
+        } else if (strcmp(argv[i], "--all") == 0) {
+            display_all = 1;
         } else if ((strcmp(argv[i], "-i") == 0 ||
                     strcmp(argv[i], "--intersection") == 0) &&
                    i + 1 < argc) {
@@ -120,82 +120,25 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
+    if (role == NULL) {
+        role = (!explicit_intersection && service_arg == NULL) ? "launch" : "core";
+    }
+
+    if (display_all && ((strcmp(role, "display") != 0 && strcmp(role, "ui") != 0) ||
+                        explicit_intersection || service_arg != NULL)) {
+        fprintf(stderr, "Use --all with --role display or ui, without -i or -n\n");
+        return EXIT_FAILURE;
+    }
+
     default_service_name(intersection_id, explicit_intersection,
                          service_name, sizeof(service_name));
     if (service_arg != NULL) {
         snprintf(service_name, sizeof(service_name), "%s", service_arg);
     }
 
-    local_state_init(mode, intersection_id, service_name);
-
-    printf("Local instance I%u using service '%s'\n",
-           (unsigned)intersection_id + 1, service_name);
-
-    attach = connection_register_service(service_name, mode);
-    if (attach == NULL) {
-        local_state_destroy();
-        return EXIT_FAILURE;
+    if (strcmp(role, "ui") == 0 && !explicit_intersection && service_arg == NULL) {
+        display_all = 1;
     }
 
-    local_receive_init(&recv_ctx, attach);
-
-    if (pthread_create(&msg_thread, NULL, message_handler_thread, &recv_ctx) != 0) {
-        fprintf(stderr, "Failed to create message handler thread\n");
-        connection_unregister_service(attach);
-        local_state_destroy();
-        return EXIT_FAILURE;
-    }
-
-    if (pthread_create(&conn_thread, NULL, connection_thread, NULL) != 0) {
-        fprintf(stderr, "Failed to create connection thread\n");
-        return EXIT_FAILURE;
-    }
-
-    if (pthread_create(&ui_thread, NULL, ui_refresh_thread, NULL) != 0) {
-        fprintf(stderr, "Failed to create UI thread\n");
-        return EXIT_FAILURE;
-    }
-
-    if (pthread_create(&hb_thread, NULL, heartbeat_thread, NULL) != 0) {
-        fprintf(stderr, "Failed to create heartbeat thread\n");
-        return EXIT_FAILURE;
-    }
-
-    if (pthread_create(&traffic_thread_id, NULL, traffic_thread, NULL) != 0) {
-        fprintf(stderr, "Failed to create traffic thread\n");
-        return EXIT_FAILURE;
-    }
-
-    if (pthread_create(&status_thread_id, NULL, status_thread, NULL) != 0) {
-        fprintf(stderr, "Failed to create status thread\n");
-        return EXIT_FAILURE;
-    }
-
-    display_ui();
-
-    while (1) {
-        if (fgets(cmd, sizeof(cmd), stdin) != NULL) {
-            cmd[strcspn(cmd, "\n")] = '\0';
-
-            if (strlen(cmd) == 0) {
-                display_ui();
-                continue;
-            }
-
-            if (strcmp(cmd, "q") == 0 ||
-                strcmp(cmd, "quit") == 0 ||
-                strcmp(cmd, "exit") == 0) {
-                printf("Exiting...\n");
-                break;
-            }
-
-            execute_command(cmd);
-            sleep(1);
-            display_ui();
-        }
-    }
-
-    connection_unregister_service(attach);
-    local_state_destroy();
-    return EXIT_SUCCESS;
+    return local_process_run(role, mode, intersection_id, service_name, display_all);
 }

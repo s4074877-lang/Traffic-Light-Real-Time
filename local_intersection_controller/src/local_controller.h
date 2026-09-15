@@ -8,7 +8,6 @@
 #include "../../common/common.h"
 #include "../../common/communication/connection.h"
 #include "../../common/communication/receive.h"
-#include "../../common/communication/send.h"
 
 #define DEMO_HIGH_CAR_COUNT 6
 #define PED_GREEN_CAP_SEC 10
@@ -38,15 +37,13 @@ typedef struct {
 } local_timing_config_t;
 
 typedef struct {
-    connection_t central_conn;
-    connection_t train_conn;
+    int central_connected;
+    int train_connected;
     connection_mode_t mode;
     char service_name[LOCAL_SERVICE_NAME_MAX];
 
     char last_recv_central[32];
     char last_recv_train[32];
-    char last_send_central[32];
-    char last_send_train[32];
     char last_central_update[32];
     char last_train_update[32];
 
@@ -59,6 +56,11 @@ typedef struct {
     int phase_duration;
     int ns_green_sec;
     int ew_green_sec;
+
+    /* One committed allocation for both Green phases. */
+    int cycle_ns_green;
+    int cycle_ew_green;
+    int cycle_plan_valid;
 
     int sensor_ns_count;
     int sensor_ew_count;
@@ -91,7 +93,6 @@ typedef struct {
 
     uint8_t intersection_id;
     int fault_active;
-    int fault_pending;
     fault_type_t fault_type;
     fault_severity_t fault_severity;
     char fault_description[32];
@@ -100,17 +101,12 @@ typedef struct {
     int train_active;
     int train_recovery_remaining;
 
-    int ui_needs_update;
-    int status_dirty;
     uint16_t status_sequence;
     uint16_t fault_sequence;
     uint16_t heartbeat_sequence;
     uint16_t last_applied_command_id;
 
-    pthread_cond_t status_cond;
     pthread_mutex_t mutex;
-    pthread_mutex_t central_send_mutex;
-    pthread_mutex_t train_send_mutex;
 } local_state_t;
 
 extern local_state_t state;
@@ -143,8 +139,9 @@ int random_car_gap_seconds(void);
 const local_timing_config_t* local_config_for_intersection(uint8_t intersection_id);
 int local_fixed_cycle_seconds_locked(void);
 int green_time_for_direction(direction_t direction);
-int vehicle_signal_seconds_locked(direction_t direction);
-int pedestrian_signal_seconds_locked(direction_t direction);
+void local_plan_cycle_locked(void);
+void set_initial_phase_locked(void);
+void update_pedestrian_locked(void);
 
 void traffic_tick_locked(void);
 void update_temporary_mode_locked(void);
@@ -166,15 +163,10 @@ void set_sim_hour_locked(int hour);
 void set_sim_minute_locked(unsigned minute);
 #endif
 
-void display_ui(void);
 int execute_command(const char *cmd);
 
-void local_receive_init(receive_context_t *recv_ctx, name_attach_t *attach);
-void* message_handler_thread(void *arg);
-void* connection_thread(void *arg);
-void* ui_refresh_thread(void *arg);
-void* traffic_thread(void *arg);
-void* status_thread(void *arg);
-void* heartbeat_thread(void *arg);
+int local_dispatch_message(test_message_t *msg, reply_t *reply);
+int local_process_run(const char *role, connection_mode_t mode,
+                      uint8_t intersection_id, const char *service_name, int display_all);
 
 #endif

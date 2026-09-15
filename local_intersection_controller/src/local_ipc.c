@@ -3,6 +3,7 @@
 #include <ctype.h>
 #include <string.h>
 
+#if ENABLE_TRAFFIC_SIMULATION
 static int parse_sim_number(const char *text, unsigned maximum, unsigned *value) {
     unsigned parsed = 0;
 
@@ -64,7 +65,6 @@ static int parse_sim_command(const char *text, unsigned *target,
     return 0;
 }
 
-#if ENABLE_TRAFFIC_SIMULATION
 static int handle_simulation_message(int rcvid, test_message_t *msg,
                                      reply_t *reply, void *ctx) {
     local_state_t *s = (local_state_t *)ctx;
@@ -100,8 +100,10 @@ static int handle_simulation_message(int rcvid, test_message_t *msg,
             set_sim_minute_locked(minute);
             accepted = 1;
         }
-        if (accepted) mark_status_dirty_locked();
-        s->ui_needs_update = 1;
+        if (accepted) {
+            s->last_applied_command_id = (uint16_t)command_id;
+            mark_status_dirty_locked();
+        }
     }
     pthread_mutex_unlock(&s->mutex);
     reply->status = accepted ? 0 : -1;
@@ -128,7 +130,6 @@ static int handle_test_message(int rcvid, test_message_t *msg,
         get_timestamp(s->last_train_update, sizeof(s->last_train_update));
     }
 
-    s->ui_needs_update = 1;
     pthread_mutex_unlock(&s->mutex);
 
     reply->status = 0;
@@ -194,7 +195,6 @@ static int handle_mode_command(int rcvid, test_message_t *msg,
         }
     }
 
-    s->ui_needs_update = 1;
     pthread_mutex_unlock(&s->mutex);
 
     reply->status = accepted ? 0 : -1;
@@ -229,15 +229,14 @@ static int handle_coordination_command(int rcvid, test_message_t *msg,
         s->manual_mode_override = 1;
         s->coordination_phase = command.phase;
         s->coordination_offset_sec = command.cycle_offset_sec;
-        s->coordination_pending =
-            !(s->phase == command.phase && s->time_remaining > 0);
+        /* Even the same phase may request a different offset. */
+        s->coordination_pending = 1;
         clear_fault_locked();
         accepted = 1;
         s->last_applied_command_id = command.command_id;
         mark_status_dirty_locked();
     }
 
-    s->ui_needs_update = 1;
     pthread_mutex_unlock(&s->mutex);
 
     reply->status = accepted ? 0 : -1;
@@ -257,7 +256,7 @@ static int handle_sensor_update(int rcvid, test_message_t *msg,
 
     pthread_mutex_lock(&s->mutex);
     if (target_matches_local(sensor.intersection_id) &&
-        sensor.direction <= DIR_EW) {
+        sensor.direction <= DIR_EW && sensor.car_count <= MAX_SENSOR_CARS) {
         s->manual_sensor_override = 1;
         if (sensor.direction == DIR_NS) {
             s->sensor_ns_count = sensor.car_count;
@@ -267,7 +266,6 @@ static int handle_sensor_update(int rcvid, test_message_t *msg,
         accepted = 1;
         mark_status_dirty_locked();
     }
-    s->ui_needs_update = 1;
     pthread_mutex_unlock(&s->mutex);
 
     reply->status = accepted ? 0 : -1;
@@ -291,7 +289,6 @@ static int handle_ped_request(int rcvid, test_message_t *msg,
         add_pedestrian_request_locked((direction_t)ped.direction);
         accepted = 1;
     }
-    s->ui_needs_update = 1;
     pthread_mutex_unlock(&s->mutex);
 
     reply->status = accepted ? 0 : -1;
@@ -325,7 +322,6 @@ static int handle_railway_message(int rcvid, test_message_t *msg,
             accepted = 1;
         }
     }
-    s->ui_needs_update = 1;
     pthread_mutex_unlock(&s->mutex);
 
     reply->status = accepted ? 0 : -1;
@@ -346,13 +342,17 @@ static message_handler_entry_t handlers[] = {
     { MSG_TRAIN_CLEAR, CONTROLLER_TRAIN, handle_railway_message }
 };
 
-void local_receive_init(receive_context_t *recv_ctx, name_attach_t *attach) {
-    receive_init(recv_ctx, attach, handlers,
-                 sizeof(handlers) / sizeof(handlers[0]), &state);
-}
-
-void* message_handler_thread(void *arg) {
-    receive_context_t *ctx = (receive_context_t *)arg;
-    receive_loop(ctx);
-    return NULL;
+int local_dispatch_message(test_message_t *msg, reply_t *reply) {
+    size_t i;
+    memset(reply, 0, sizeof(*reply));
+    get_timestamp(reply->timestamp, sizeof(reply->timestamp));
+    if (msg->header.dst != CONTROLLER_LOCAL) return -1;
+    if (msg->header.type == MSG_HEARTBEAT) return 0;
+    for (i = 0; i < sizeof(handlers) / sizeof(handlers[0]); ++i) {
+        if (handlers[i].msg_type == msg->header.type &&
+            (!handlers[i].from || handlers[i].from == msg->header.src)) {
+            return handlers[i].handler(0, msg, reply, &state);
+        }
+    }
+    return -1;
 }

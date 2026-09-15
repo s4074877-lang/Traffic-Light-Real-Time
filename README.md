@@ -2,6 +2,10 @@
 
 ## Running the Controllers
 
+Local now runs separate `--role core`, `--role comm`, `--role io`, and
+`--role display` processes. See [Local process deployment](local_intersection_controller/PROCESSES.md)
+for the complete six-intersection startup and failure checks.
+
 ### Single VM Testing (Local Mode)
 
 ```bash
@@ -9,10 +13,18 @@
 /tmp/central_controller -l
 
 # Terminal 2, legacy I1 service
-/tmp/local_intersection_controller -l
+/tmp/local_intersection_controller -l --role core
+
+# Additional terminal: publishes the legacy I1 endpoint
+/tmp/local_intersection_controller -l --role comm
+
+# Separate terminals for display and input
+/tmp/local_intersection_controller -l --role display
+/tmp/local_intersection_controller -l --role io
 
 # Or run a specific Local instance/service
-/tmp/local_intersection_controller -l -i I2 -n traffic_local_I2
+/tmp/local_intersection_controller -l -i I2 -n traffic_local_I2 --role core
+/tmp/local_intersection_controller -l -i I2 -n traffic_local_I2 --role comm
 
 # Terminal 3
 /tmp/train_controller -l

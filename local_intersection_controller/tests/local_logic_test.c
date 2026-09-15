@@ -23,8 +23,8 @@ static unsigned failures;
 
 static void reset_core(void) {
     pthread_mutex_lock(&state.mutex);
-    state.central_conn.connected = 0;
-    state.train_conn.connected = 0;
+    state.central_connected = 0;
+    state.train_connected = 0;
     state.traffic_mode = MODE_FIXED;
     state.initial_phase = PHASE_NS_GREEN;
     state.phase = PHASE_NS_GREEN;
@@ -59,9 +59,11 @@ static void reset_core(void) {
     state.coordination_offset_sec = 0;
     state.ped_extra_ns_green = 0;
     state.ped_extra_ew_green = 0;
+    state.cycle_plan_valid = 0;
+    state.cycle_ns_green = GREEN_BASE_SEC;
+    state.cycle_ew_green = GREEN_BASE_SEC;
     state.last_applied_command_id = 0;
     state.fault_active = 0;
-    state.fault_pending = 0;
     state.fault_type = FAULT_NONE;
     state.fault_severity = SEV_LOW;
     state.fault_description[0] = '\0';
@@ -141,7 +143,7 @@ static void test_fixed_cycle_timing_without_central(void) {
 
     reset_core();
     pthread_mutex_lock(&state.mutex);
-    CHECK(state.central_conn.connected == 0);
+    CHECK(state.central_connected == 0);
     for (i = 0; i < GREEN_BASE_SEC; ++i) {
         traffic_tick_locked();
     }
@@ -192,25 +194,8 @@ static void test_configured_intersection_profiles(void) {
         CHECK(config->ns_green_sec <= GREEN_MAX_SEC);
         CHECK(config->ew_green_sec >= GREEN_MIN_SEC);
         CHECK(config->ew_green_sec <= GREEN_MAX_SEC);
+        CHECK(config->ns_green_sec + config->ew_green_sec + 2 * YELLOW_SEC == 44);
     }
-}
-
-static void test_reset_uses_initial_profile(void) {
-    reset_core();
-    pthread_mutex_lock(&state.mutex);
-    state.initial_phase = PHASE_EW_GREEN;
-    state.ns_green_sec = 22;
-    state.ew_green_sec = 28;
-    state.phase = PHASE_NS_GREEN;
-    state.phase_duration = 22;
-    state.time_remaining = 7;
-    reset_demo_inputs_locked();
-    CHECK(state.phase == PHASE_EW_GREEN);
-    CHECK(state.ns_light == LIGHT_RED);
-    CHECK(state.ew_light == LIGHT_GREEN);
-    CHECK(state.phase_duration == 28);
-    CHECK(state.time_remaining == 28);
-    pthread_mutex_unlock(&state.mutex);
 }
 
 static void test_sensor_timing(void) {
@@ -225,6 +210,78 @@ static void test_sensor_timing(void) {
     state.sensor_ew_count = SENSOR_CAR_THRESHOLD;
     CHECK(green_time_for_direction(DIR_NS) == GREEN_BASE_SEC);
     CHECK(green_time_for_direction(DIR_EW) == GREEN_BASE_SEC);
+    pthread_mutex_unlock(&state.mutex);
+}
+
+static void tick_seconds(int seconds) {
+    while (seconds-- > 0) traffic_tick_locked();
+}
+
+static void test_sensor_change_keeps_cycle_budget(void) {
+    reset_core();
+    pthread_mutex_lock(&state.mutex);
+    state.traffic_mode = MODE_SENSOR;
+    state.sensor_ns_count = SENSOR_CAR_THRESHOLD;
+    local_plan_cycle_locked();
+    state.phase_duration = state.time_remaining = state.cycle_ns_green;
+    CHECK(state.time_remaining == 25);
+    tick_seconds(10);
+    state.sensor_ns_count = 0;
+    state.sensor_ew_count = SENSOR_CAR_THRESHOLD;
+    tick_seconds(17);
+    CHECK(state.phase == PHASE_EW_GREEN);
+    CHECK(state.time_remaining == 15);
+    tick_seconds(17);
+    CHECK(state.phase == PHASE_NS_GREEN);
+    CHECK(state.time_remaining == 15);
+    CHECK(state.cycle_ew_green == 25);
+    pthread_mutex_unlock(&state.mutex);
+}
+
+static void test_pedestrian_transfer_across_cycle(void) {
+    reset_core();
+    pthread_mutex_lock(&state.mutex);
+    local_plan_cycle_locked();
+    tick_seconds(23);
+    CHECK(state.phase == PHASE_EW_GREEN);
+    CHECK(state.time_remaining == 19);
+    add_pedestrian_request_locked(DIR_NS);
+    CHECK(state.time_remaining == 10);
+    CHECK(state.ped_extra_ns_green == 9);
+    add_pedestrian_request_locked(DIR_NS);
+    CHECK(state.ped_extra_ns_green == 9);
+    state.traffic_mode = MODE_SENSOR;
+    state.sensor_ns_count = SENSOR_CAR_THRESHOLD;
+    tick_seconds(12);
+    CHECK(state.phase == PHASE_NS_GREEN);
+    CHECK(state.time_remaining == 30);
+    CHECK(state.cycle_ns_green == 21);
+    CHECK(state.cycle_ew_green == 19);
+    CHECK(state.ped_extra_ns_green == 0);
+    tick_seconds(53);
+    CHECK(state.phase == PHASE_NS_GREEN);
+    /* First cycle 35s + second cycle 53s = two baseline 44s cycles. */
+    CHECK(state.time_remaining == 25);
+    pthread_mutex_unlock(&state.mutex);
+}
+
+static void test_pedestrian_transfer_at_green_limit(void) {
+    reset_core();
+    pthread_mutex_lock(&state.mutex);
+    state.initial_phase = PHASE_EW_GREEN;
+    state.phase = PHASE_EW_GREEN;
+    state.traffic_mode = MODE_SENSOR;
+    state.sensor_ns_count = SENSOR_CAR_THRESHOLD;
+    local_plan_cycle_locked();
+    state.phase_duration = state.time_remaining = state.cycle_ew_green;
+    add_pedestrian_request_locked(DIR_NS);
+    CHECK(state.time_remaining == 10);
+    CHECK(state.ped_extra_ns_green == 5);
+    tick_seconds(12);
+    CHECK(state.phase == PHASE_NS_GREEN);
+    CHECK(state.time_remaining == 30);
+    tick_seconds(32);
+    CHECK(state.phase == PHASE_EW_GREEN);
     pthread_mutex_unlock(&state.mutex);
 }
 
@@ -317,18 +374,53 @@ static void test_runtime_ids_and_railway_mapping(void) {
     pthread_mutex_unlock(&state.mutex);
 }
 
+static void test_repeated_train_message_keeps_yellow(void) {
+    reset_core();
+    pthread_mutex_lock(&state.mutex);
+    start_train_message_locked(1, 30);
+    traffic_tick_locked();
+    CHECK(state.phase == PHASE_NS_YELLOW);
+    CHECK(state.time_remaining == 1);
+    start_train_message_locked(1, 29);
+    CHECK(state.phase == PHASE_NS_YELLOW);
+    CHECK(state.time_remaining == 1);
+    CHECK(state.train_pending == 1);
+    traffic_tick_locked();
+    CHECK(state.phase == PHASE_RAILWAY_HOLD);
+    CHECK(state.train_active == 1);
+    pthread_mutex_unlock(&state.mutex);
+}
+
+static void test_conflicting_outputs_enter_failsafe(void) {
+    reset_core();
+    pthread_mutex_lock(&state.mutex);
+    state.ns_light = LIGHT_GREEN;
+    state.ew_light = LIGHT_GREEN;
+    traffic_tick_locked();
+    CHECK(state.traffic_mode == MODE_FAILSAFE);
+    CHECK(state.fault_type == FAULT_NOT_WORKING);
+    CHECK(state.ns_light == LIGHT_RED);
+    CHECK(state.ew_light == LIGHT_RED);
+    CHECK(state.ped_ns_walk == 0 && state.ped_ew_walk == 0);
+    pthread_mutex_unlock(&state.mutex);
+}
+
 int main(void) {
     local_state_init(CONN_MODE_LOCAL, I1, LOCAL_SERVICE_NAME);
     test_initial_profile_loaded();
     test_configured_intersection_profiles();
-    test_reset_uses_initial_profile();
     test_status_telemetry();
     test_typed_heartbeat_health();
     test_fixed_cycle_timing_without_central();
     test_sensor_timing();
+    test_sensor_change_keeps_cycle_budget();
+    test_pedestrian_transfer_across_cycle();
+    test_pedestrian_transfer_at_green_limit();
     test_pedestrian_request_cap();
     test_railway_preemption_and_clear();
     test_runtime_ids_and_railway_mapping();
+    test_repeated_train_message_keeps_yellow();
+    test_conflicting_outputs_enter_failsafe();
     local_state_destroy();
 
     printf("LOCAL_LOGIC_TEST %s checks=%u failures=%u\n",

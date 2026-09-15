@@ -4,12 +4,12 @@ static const local_timing_config_t local_configs[NUM_INTERSECTIONS] = {
     /* User-selected stagger profile:
      * I1 EW, I2 NS, I3 NS, I4 EW, I5 EW, I6 NS.
      */
-    { PHASE_EW_GREEN, 22, 28 },
-    { PHASE_NS_GREEN, 30, 18 },
-    { PHASE_NS_GREEN, 26, 20 },
-    { PHASE_EW_GREEN, 18, 30 },
-    { PHASE_EW_GREEN, 20, 26 },
-    { PHASE_NS_GREEN, 28, 22 }
+    { PHASE_EW_GREEN, GREEN_BASE_SEC, GREEN_BASE_SEC },
+    { PHASE_NS_GREEN, GREEN_BASE_SEC, GREEN_BASE_SEC },
+    { PHASE_NS_GREEN, GREEN_BASE_SEC, GREEN_BASE_SEC },
+    { PHASE_EW_GREEN, GREEN_BASE_SEC, GREEN_BASE_SEC },
+    { PHASE_EW_GREEN, GREEN_BASE_SEC, GREEN_BASE_SEC },
+    { PHASE_NS_GREEN, GREEN_BASE_SEC, GREEN_BASE_SEC }
 };
 
 const local_timing_config_t* local_config_for_intersection(uint8_t intersection_id) {

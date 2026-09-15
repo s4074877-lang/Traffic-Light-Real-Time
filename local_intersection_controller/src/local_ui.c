@@ -1,226 +1,79 @@
-#include "local_controller.h"
+#include "local_process.h"
 
-static void clear_screen(void) {
-    printf("\033[2J\033[H");
-}
+int run_display(const char *core_name, int display_all) {
+    int connections[NUM_INTERSECTIONS];
+    char names[NUM_INTERSECTIONS][LOCAL_SERVICE_NAME_MAX + 8];
+    int count = display_all ? NUM_INTERSECTIONS : 1;
+    int i;
 
-static const char* mode_text(traffic_light_mode mode) {
-    switch (mode) {
-        case MODE_FIXED:    return "FIXED";
-        case MODE_SENSOR:   return "SENSOR";
-        case MODE_RAILWAY:  return "RAILWAY";
-        case MODE_FAILSAFE: return "FAILSAFE";
-        default:            return "UNKNOWN";
+    for (i = 0; i < count; ++i) {
+        connections[i] = -1;
+        if (display_all) {
+            snprintf(names[i], sizeof(names[i]), "traffic_local_I%d_core", i + 1);
+        } else {
+            snprintf(names[i], sizeof(names[i]), "%s", core_name);
+        }
     }
-}
 
-static const char* light_text(light_state_t light) {
-    switch (light) {
-        case LIGHT_OFF:    return "OFF";
-        case LIGHT_RED:    return "RED";
-        case LIGHT_YELLOW: return "YELLOW";
-        case LIGHT_GREEN:  return "GREEN";
-        default:           return "UNKNOWN";
-    }
-}
+    while (!local_stopping) {
+        core_reply_t replies[NUM_INTERSECTIONS];
+        int online[NUM_INTERSECTIONS];
 
-static const char* phase_text(phase_t phase) {
-    switch (phase) {
-        case PHASE_NS_GREEN:     return "NS_GREEN";
-        case PHASE_NS_YELLOW:    return "NS_YELLOW";
-        case PHASE_EW_GREEN:     return "EW_GREEN";
-        case PHASE_EW_YELLOW:    return "EW_YELLOW";
-        case PHASE_RAILWAY_HOLD: return "RAILWAY_HOLD";
-        default:                 return "UNKNOWN";
-    }
-}
-
-#if ENABLE_TRAFFIC_SIMULATION
-static const char* period_text(int seconds) {
-    if (is_peak_time(seconds)) {
-        return "PEAK";
-    }
-    if (is_night_time(seconds)) {
-        return "NIGHT";
-    }
-    return "OFFPEAK";
-}
-
-static void format_sim_time(char *buf, size_t len) {
-    int hour = state.sim_seconds / 3600;
-    int minute = (state.sim_seconds % 3600) / 60;
-    int second = state.sim_seconds % 60;
-    snprintf(buf, len, "%02d:%02d:%02d", hour, minute, second);
-}
-#endif
-
-static void format_vehicle_signal(char *buf, size_t len,
-                                  light_state_t light, int seconds) {
-    if (seconds < 0) {
-        snprintf(buf, len, "%s WAIT", light_text(light));
-    } else {
-        snprintf(buf, len, "%s %d sec", light_text(light), seconds);
-    }
-}
-
-static void format_pedestrian_signal(char *buf, size_t len, int is_walk,
-                                     int requested, int seconds) {
-    char request_text[16];
-
-    snprintf(request_text, sizeof(request_text), "%s",
-             requested ? ", requested" : "");
-
-    if (is_walk) {
-        snprintf(buf, len, "WALK %d sec%s",
-                 seconds > 0 ? seconds : 0, request_text);
-    } else if (seconds < 0) {
-        snprintf(buf, len, "STOP WAIT%s", request_text);
-    } else {
-        snprintf(buf, len, "STOP %d sec%s",
-                 seconds, request_text);
-    }
-}
-
-void display_ui(void) {
-#if ENABLE_TRAFFIC_SIMULATION
-    char sim_time[16];
-#endif
-    char ns_vehicle[32];
-    char ew_vehicle[32];
-    char ns_pedestrian[48];
-    char ew_pedestrian[48];
-
-    pthread_mutex_lock(&state.mutex);
-#if ENABLE_TRAFFIC_SIMULATION
-    format_sim_time(sim_time, sizeof(sim_time));
-#endif
-    format_vehicle_signal(ns_vehicle, sizeof(ns_vehicle), state.ns_light,
-                          vehicle_signal_seconds_locked(DIR_NS));
-    format_vehicle_signal(ew_vehicle, sizeof(ew_vehicle), state.ew_light,
-                          vehicle_signal_seconds_locked(DIR_EW));
-    format_pedestrian_signal(ns_pedestrian, sizeof(ns_pedestrian),
-                             state.ped_ns_walk, state.ped_ns_request,
-                             pedestrian_signal_seconds_locked(DIR_NS));
-    format_pedestrian_signal(ew_pedestrian, sizeof(ew_pedestrian),
-                             state.ped_ew_walk, state.ped_ew_request,
-                             pedestrian_signal_seconds_locked(DIR_EW));
-
-    clear_screen();
-
-    printf("%s========================================================%s\n", COLOR_BOLD, COLOR_RESET);
-    printf("%s                 LOCAL CONTROLLER I%u%s\n",
-           COLOR_BOLD, (unsigned)state.intersection_id + 1, COLOR_RESET);
-    printf("%s========================================================%s\n", COLOR_BOLD, COLOR_RESET);
-    printf("Service [%s] mode [%s]\n",
-           state.service_name, connection_mode_str(state.mode));
-
-    printf("Connected to central_controller [%s%s%s] last update [%s]\n",
-           state.central_conn.connected ? COLOR_GREEN : COLOR_RED,
-           state.central_conn.connected ? "CONNECTED" : "DISCONNECTED",
-           COLOR_RESET,
-           state.last_central_update[0] ? state.last_central_update : "N/A");
-
-    printf("Connected to train_controller [%s%s%s] last update [%s]\n",
-           state.train_conn.connected ? COLOR_GREEN : COLOR_RED,
-           state.train_conn.connected ? "CONNECTED" : "DISCONNECTED",
-           COLOR_RESET,
-           state.last_train_update[0] ? state.last_train_update : "N/A");
-
-    printf("%s========================================================%s\n", COLOR_BOLD, COLOR_RESET);
-
-    printf("last message receive central [%s]\n",
-           state.last_recv_central[0] ? state.last_recv_central : "N/A");
-    printf("last message receive train [%s]\n",
-           state.last_recv_train[0] ? state.last_recv_train : "N/A");
-    printf("message send central [%s]\n",
-           state.last_send_central[0] ? state.last_send_central : "N/A");
-    printf("message send train [%s]\n",
-           state.last_send_train[0] ? state.last_send_train : "N/A");
-
-    printf("%s========================================================%s\n", COLOR_BOLD, COLOR_RESET);
-    printf("Traffic mode [%s]\n", mode_text(display_mode()));
-    printf("Phase [%s] remaining [%d sec]\n",
-           phase_text(state.phase), state.time_remaining);
-    printf("Timing profile: initial [%s] cycle [%d sec]\n",
-           phase_text(state.initial_phase), local_fixed_cycle_seconds_locked());
-    printf("  NS green [%d sec] EW green [%d sec]\n",
-           state.ns_green_sec, state.ew_green_sec);
-    printf("Telemetry seq [%u] last command [%u] health [%s]\n",
-           (unsigned)state.status_sequence,
-           (unsigned)state.last_applied_command_id,
-           (!state.fault_active && state.traffic_mode != MODE_FAILSAFE) ?
-           "HEALTHY" : "DEGRADED");
-#if ENABLE_TRAFFIC_SIMULATION
-    printf("Sim time [%s] period [%s]\n",
-           sim_time, period_text(state.sim_seconds));
-#endif
-    printf("Vehicle lights:\n");
-    printf("  NS [%s]\n", ns_vehicle);
-    printf("  EW [%s]\n", ew_vehicle);
-    printf("Pedestrian:\n");
-    printf("  NS [%s]\n", ns_pedestrian);
-    printf("  EW [%s]\n", ew_pedestrian);
-#if ENABLE_TRAFFIC_SIMULATION || ENABLE_DEMO_COMMANDS
-    printf("Sensors:\n");
-    printf("  NS cars [%d]%s\n",
-           state.sensor_ns_count,
-           state.sensor_ns_count >= SENSOR_CAR_THRESHOLD ?
-           " SENSOR-DETECTED" : "");
-    printf("  EW cars [%d]%s\n",
-           state.sensor_ew_count,
-           state.sensor_ew_count >= SENSOR_CAR_THRESHOLD ?
-           " SENSOR-DETECTED" : "");
-
-    if (state.train_pending) {
-        printf("Train: line %d approaching, clearing road in [%d] sec\n",
-               state.train_direction, state.time_remaining);
-        printf("Next train: countdown starts after current train clears\n");
-    } else if (state.train_active) {
-        if (state.train_waiting_for_clear) {
-            printf("Train: line %d active, waiting for TRAIN_CLEAR",
-                   state.train_direction);
-            if (state.train_pass_remaining > 0) {
-                printf(" eta [%d] sec", state.train_pass_remaining);
+        /* Read all snapshots before drawing so a slow peer does not leave half a table. */
+        for (i = 0; i < count; ++i) {
+            core_request_t request = {0};
+            request.operation = CORE_SNAPSHOT;
+            online[i] = core_call(&connections[i], names[i], &request, &replies[i]) == 0 &&
+                        replies[i].result.status == 0;
+            if (display_all && online[i] && replies[i].status.intersection_id != i) {
+                online[i] = 0;
             }
-            printf("\n");
-        } else {
-            printf("Train: line %d at crossing, clear in [%d] sec\n",
-                   state.train_direction, state.train_pass_remaining);
         }
-        printf("Next train: countdown starts after current train clears\n");
-    } else if (state.train_recovery_remaining > 0) {
-        printf("Train: clear, recovery remaining [%d] sec\n",
-               state.train_recovery_remaining);
-        printf("Next train: countdown starts after recovery\n");
-    } else {
-        printf("Train: none active\n");
-        if (state.train_conn.connected) {
-            printf("Railway source: train_controller messages\n");
-        } else {
-            printf("Next train: line %d in [%d] sec\n",
-                   state.next_train_direction, state.next_train_in_seconds);
+
+        local_print_heading(display_all ? INTERSECTION_ALL :
+                            online[0] ? replies[0].status.intersection_id : INTERSECTION_ALL);
+        for (i = 0; i < count; ++i) {
+            if (online[i]) {
+                local_print_panel(&replies[i], display_all);
+            } else if (display_all) {
+                printf("I%d  OFFLINE  --     --       --  --     --     --    --     --\n", i + 1);
+            } else {
+                printf("%s: OFFLINE; no current lamp state\n", names[i]);
+            }
+        }
+        fflush(stdout);
+        sleep(1);
+    }
+
+    for (i = 0; i < count; ++i) {
+        if (connections[i] != -1) {
+            name_close(connections[i]);
         }
     }
-#endif
+    return EXIT_SUCCESS;
+}
 
-    printf("%s========================================================%s\n", COLOR_BOLD, COLOR_RESET);
-    printf("Message send: send-central | send-train\n");
-#if ENABLE_DEMO_COMMANDS
-    printf("Commands: m mode | n ped-NS | e ped-EW | x sensor-NS | z sensor-EW\n");
-#if ENABLE_TRAFFIC_SIMULATION
-    printf("          1 train-line1 | 2 train-line2 | p peak | o offpeak | l night\n");
-#else
-    printf("          1 train-line1 | 2 train-line2\n");
-#endif
-    printf("          c train-clear | r reset | q quit\n");
-#else
-    printf("Demo commands are commented out. Set ENABLE_DEMO_COMMANDS to 1 to use them.\n");
-    printf("Commands: send-central | send-train | q quit\n");
-#endif
-    printf("%s========================================================%s\n", COLOR_BOLD, COLOR_RESET);
-    printf("\n%sMessage:%s ", COLOR_BOLD, COLOR_RESET);
-    fflush(stdout);
-
-    state.ui_needs_update = 0;
-    pthread_mutex_unlock(&state.mutex);
+int run_input(const char *core_name) {
+    int core = -1;
+    char line[128];
+    printf("Local input: m n e x z 1 2 p o l c r; q closes input only\n");
+    while (!local_stopping && fgets(line, sizeof(line), stdin)) {
+        core_request_t request = {0};
+        core_reply_t reply;
+        line[strcspn(line, "\r\n")] = '\0';
+        if (!strcmp(line, "q") || !strcmp(line, "quit")) break;
+        if (!line[0]) continue;
+        if (strlen(line) >= sizeof(request.command)) {
+            puts("Command too long");
+            continue;
+        }
+        strcpy(request.command, line);
+        if (!valid_input(request.command)) { puts("Unknown input command"); continue; }
+        request.operation = CORE_INPUT;
+        if (core_call(&core, core_name, &request, &reply) != 0)
+            puts("Core unavailable; command not acknowledged (not retried)");
+        else puts(reply.result.status == 0 ? "OK" : "Rejected");
+    }
+    if (core != -1) name_close(core);
+    return EXIT_SUCCESS;
 }

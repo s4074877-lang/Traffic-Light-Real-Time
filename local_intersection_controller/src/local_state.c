@@ -14,10 +14,7 @@ static void bump_sequence(uint16_t *value) {
 }
 
 void mark_status_dirty_locked(void) {
-    state.status_dirty = 1;
     bump_sequence(&state.status_sequence);
-    pthread_cond_signal(&state.status_cond);
-    state.ui_needs_update = 1;
 }
 
 traffic_light_mode display_mode(void) {
@@ -125,7 +122,6 @@ uint16_t prepare_status_message_locked(test_message_t *msg) {
 void set_fault_locked(fault_type_t type, fault_severity_t severity,
                       const char *description) {
     state.fault_active = type != FAULT_NONE;
-    state.fault_pending = 1;
     bump_sequence(&state.fault_sequence);
     state.fault_type = type;
     state.fault_severity = severity;
@@ -136,7 +132,6 @@ void set_fault_locked(fault_type_t type, fault_severity_t severity,
 
 void clear_fault_locked(void) {
     state.fault_active = 0;
-    state.fault_pending = 1;
     bump_sequence(&state.fault_sequence);
     state.fault_type = FAULT_NONE;
     state.fault_severity = SEV_LOW;
@@ -174,23 +169,15 @@ void local_state_init(connection_mode_t mode, uint8_t intersection_id,
                       const char *service_name) {
     const local_timing_config_t *config;
     direction_t initial_direction;
-    pthread_condattr_t status_cond_attr;
 #if ENABLE_TRAFFIC_SIMULATION
     srand((unsigned)time(NULL));
 #endif
     memset(&state, 0, sizeof(state));
     pthread_mutex_init(&state.mutex, NULL);
-    pthread_mutex_init(&state.central_send_mutex, NULL);
-    pthread_mutex_init(&state.train_send_mutex, NULL);
-    pthread_condattr_init(&status_cond_attr);
-    pthread_condattr_setclock(&status_cond_attr, CLOCK_MONOTONIC);
-    pthread_cond_init(&state.status_cond, &status_cond_attr);
-    pthread_condattr_destroy(&status_cond_attr);
     state.mode = mode;
-    state.ui_needs_update = 1;
-    state.status_dirty = 1;
     state.status_sequence = 1;
     state.fault_sequence = 1;
+    state.fault_severity = SEV_LOW;
     if (intersection_id >= NUM_INTERSECTIONS) {
         intersection_id = I1;
     }
@@ -214,6 +201,7 @@ void local_state_init(connection_mode_t mode, uint8_t intersection_id,
     state.traffic_mode = MODE_FIXED;
 #endif
     state.phase = state.initial_phase;
+    local_plan_cycle_locked();
     initial_direction =
         state.phase == PHASE_EW_GREEN ? DIR_EW : DIR_NS;
     state.phase_duration = green_time_for_direction(initial_direction);
@@ -225,15 +213,8 @@ void local_state_init(connection_mode_t mode, uint8_t intersection_id,
         state.ns_light = LIGHT_GREEN;
         state.ew_light = LIGHT_RED;
     }
-    connection_init(&state.central_conn, CENTRAL_SERVICE_NAME, mode, &state.mutex);
-    connection_init(&state.train_conn, TRAIN_SERVICE_NAME, mode, &state.mutex);
 }
 
 void local_state_destroy(void) {
-    connection_close(&state.central_conn);
-    connection_close(&state.train_conn);
-    pthread_cond_destroy(&state.status_cond);
     pthread_mutex_destroy(&state.mutex);
-    pthread_mutex_destroy(&state.central_send_mutex);
-    pthread_mutex_destroy(&state.train_send_mutex);
 }
