@@ -88,8 +88,7 @@ static int handle_simulation_message(int rcvid, test_message_t *msg,
         get_timestamp(s->last_central_update, sizeof(s->last_central_update));
         if (action == 1) {
             s->sim_running = 1;
-            s->next_ns_car_in_seconds = random_car_gap_seconds();
-            s->next_ew_car_in_seconds = random_car_gap_seconds();
+            s->next_car_in_seconds = random_car_gap_seconds();
             s->next_train_in_seconds = random_train_gap_seconds();
             s->next_train_direction = random_train_direction();
             accepted = 1;

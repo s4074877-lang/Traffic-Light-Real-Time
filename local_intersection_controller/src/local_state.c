@@ -130,6 +130,19 @@ void fill_status_locked(status_msg_t *status) {
     status->fault_severity = state.fault_active ? state.fault_severity : 0;
 }
 
+/* Remaining time for the current lamp, assuming no new external event. */
+int local_vehicle_seconds(const status_msg_t *status, direction_t direction) {
+    unsigned lamp = direction == DIR_NS ? status->ns_state : status->ew_state;
+    if (status->railway_preempt || status->mode == MODE_FAILSAFE ||
+        status->phase > PHASE_EW_YELLOW || lamp == LIGHT_OFF) return -1;
+    if (lamp == LIGHT_RED) {
+        if (status->coordination_pending) return -1;
+        if (status->phase == PHASE_NS_GREEN || status->phase == PHASE_EW_GREEN)
+            return status->time_remaining + YELLOW_SEC;
+    }
+    return status->time_remaining;
+}
+
 uint16_t prepare_status_message_locked(test_message_t *msg) {
     status_msg_t status;
     init_message(msg, MSG_STATUS_UPDATE, CONTROLLER_LOCAL, CONTROLLER_CENTRAL);
@@ -188,9 +201,6 @@ void local_state_init(connection_mode_t mode, uint8_t intersection_id,
                       const char *service_name) {
     const local_timing_config_t *config;
     direction_t initial_direction;
-#if ENABLE_TRAFFIC_SIMULATION
-    srand((unsigned)time(NULL));
-#endif
     memset(&state, 0, sizeof(state));
     pthread_mutex_init(&state.mutex, NULL);
     state.mode = mode;
@@ -200,6 +210,10 @@ void local_state_init(connection_mode_t mode, uint8_t intersection_id,
     if (intersection_id >= NUM_INTERSECTIONS) {
         intersection_id = I1;
     }
+#if ENABLE_TRAFFIC_SIMULATION
+    /* Cores launched in the same second still need different random streams. */
+    srand((unsigned)time(NULL) ^ ((unsigned)(intersection_id + 1) * 2654435761U));
+#endif
     config = local_config_for_intersection(intersection_id);
     state.intersection_id = intersection_id;
     state.initial_phase = config->initial_phase;
@@ -212,8 +226,7 @@ void local_state_init(connection_mode_t mode, uint8_t intersection_id,
     state.sim_seconds = 6 * 3600;
     state.next_train_in_seconds = random_train_gap_seconds();
     state.next_train_direction = random_train_direction();
-    state.next_ns_car_in_seconds = random_car_gap_seconds();
-    state.next_ew_car_in_seconds = random_car_gap_seconds();
+    state.next_car_in_seconds = random_car_gap_seconds();
     state.traffic_mode = is_peak_time(state.sim_seconds) ? MODE_FIXED : MODE_SENSOR;
     apply_time_settings_locked();
 #else

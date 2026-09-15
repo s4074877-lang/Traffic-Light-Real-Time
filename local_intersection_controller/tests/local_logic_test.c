@@ -44,8 +44,7 @@ static void reset_core(void) {
     state.sim_running = 1;
     state.next_train_in_seconds = 0;
     state.next_train_direction = 1;
-    state.next_ns_car_in_seconds = 0;
-    state.next_ew_car_in_seconds = 0;
+    state.next_car_in_seconds = 0;
     state.train_direction = 0;
     state.train_pass_remaining = 0;
     state.train_waiting_for_clear = 0;

@@ -57,7 +57,7 @@ void rail_sim_cancel_timer(crossing_t *cx, timer_id_t timer_id);
 // ============================================
 
 // Process a command string (from console or Central)
-// cmd: command string (e.g., "train-up", "p1-fault", "test")
+// cmd: command string (e.g., "train-up", "p1-fault", "status")
 // reply: buffer for reply message
 // reply_len: size of reply buffer
 // Returns: true if command was recognized

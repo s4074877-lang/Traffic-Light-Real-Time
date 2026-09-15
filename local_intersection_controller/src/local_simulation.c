@@ -87,30 +87,24 @@ void update_vehicle_counts_locked(void) {
         return;
     }
 
-    if (!state.manual_sensor_override) {
-        if (state.next_ns_car_in_seconds > 0) {
-            state.next_ns_car_in_seconds--;
-        }
-        if (state.next_ew_car_in_seconds > 0) {
-            state.next_ew_car_in_seconds--;
-        }
-
-        if (state.next_ns_car_in_seconds <= 0) {
-            add_car_locked(DIR_NS);
-            state.next_ns_car_in_seconds = random_car_gap_seconds();
-        }
-        if (state.next_ew_car_in_seconds <= 0) {
-            add_car_locked(DIR_EW);
-            state.next_ew_car_in_seconds = random_car_gap_seconds();
-        }
-    }
-
+    /* Green reduces the count; red keeps cars waiting. */
     if (!state.train_pending && !state.train_active &&
         state.train_recovery_remaining <= 0) {
         if (state.phase == PHASE_NS_GREEN) {
             let_cars_pass_locked(DIR_NS);
         } else if (state.phase == PHASE_EW_GREEN) {
             let_cars_pass_locked(DIR_EW);
+        }
+    }
+
+    /* Random arrivals increase NS, EW or both, up to MAX_SENSOR_CARS. */
+    if (!state.manual_sensor_override) {
+        if (state.next_car_in_seconds > 0) state.next_car_in_seconds--;
+        if (state.next_car_in_seconds <= 0) {
+            int arrival = rand() % 3; /* 0: NS, 1: EW, 2: both. */
+            if (arrival == 0 || arrival == 2) add_car_locked(DIR_NS);
+            if (arrival == 1 || arrival == 2) add_car_locked(DIR_EW);
+            state.next_car_in_seconds = random_car_gap_seconds();
         }
     }
 }
@@ -154,8 +148,7 @@ static void set_sim_seconds_locked(int seconds) {
 #if ENABLE_TRAFFIC_SIMULATION
     state.next_train_in_seconds = random_train_gap_seconds();
     state.next_train_direction = random_train_direction();
-    state.next_ns_car_in_seconds = random_car_gap_seconds();
-    state.next_ew_car_in_seconds = random_car_gap_seconds();
+    state.next_car_in_seconds = random_car_gap_seconds();
 #endif
 }
 
@@ -212,8 +205,7 @@ void reset_demo_inputs_locked(void) {
 #if ENABLE_TRAFFIC_SIMULATION
     state.next_train_in_seconds = random_train_gap_seconds();
     state.next_train_direction = random_train_direction();
-    state.next_ns_car_in_seconds = random_car_gap_seconds();
-    state.next_ew_car_in_seconds = random_car_gap_seconds();
+    state.next_car_in_seconds = random_car_gap_seconds();
     apply_time_settings_locked();
 #else
     state.traffic_mode = MODE_FIXED;
