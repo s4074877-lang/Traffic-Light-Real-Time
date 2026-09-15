@@ -27,6 +27,7 @@ static uint64_t monotonic_ns(void) {
 
 #define UI_RESET       "\033[0m"
 #define UI_DIM_CYAN    "\033[2;36m"
+#define UI_DIM_WHITE   "\033[2;37m"
 #define UI_RED         "\033[1;31m"
 #define UI_GREEN       "\033[1;32m"
 #define UI_YELLOW      "\033[1;33m"
@@ -59,7 +60,7 @@ static const char *keyword_color(const char *start, const char *cursor, size_t *
         {"FAULT", UI_RED}, {"FAILSAFE", UI_RED}, {"NO REPORT", UI_YELLOW}, {"NO DATA", UI_YELLOW},
         {"STOP", UI_RED}, {"RED", UI_RED},
         {"CLOSED", UI_YELLOW}, {"CLOSING", UI_YELLOW},
-        {"STALE", UI_YELLOW}, {"WAITING", UI_YELLOW}, {"UNKNOWN", UI_YELLOW},
+        {"STALE", UI_YELLOW}, {"WAITING", UI_YELLOW}, {"UNKNOWN", UI_YELLOW}, {"REQ", UI_YELLOW},
         {"YELLOW", UI_YELLOW}, {"HOLD", UI_YELLOW}, {"STANDBY", UI_YELLOW},
         {"CONNECTED", UI_GREEN}, {"HEALTHY", UI_GREEN}, {"CURRENT", UI_GREEN},
         {"ONLINE", UI_GREEN}, {"CLEAR", UI_GREEN}, {"GREEN", UI_GREEN},
@@ -69,7 +70,7 @@ static const char *keyword_color(const char *start, const char *cursor, size_t *
         {"P1", UI_MAGENTA}, {"P2", UI_MAGENTA}, {"P3", UI_MAGENTA},
         {"SENSORS", UI_BLUE}, {"SENSOR", UI_BLUE}, {"FIXED", UI_CYAN}, {"GLOBAL", UI_CYAN},
         {"LOCAL", UI_CYAN}, {"SNAPSHOT", UI_WHITE}, {"LIVE VIEW", UI_WHITE},
-        {"CENTRAL CONTROL ROOM", UI_CYAN}, {"INTERSECTIONS", UI_CYAN},
+        {"CENTRAL CONTROL ROOM", UI_CYAN}, {"LIVE TRAFFIC MAP", UI_CYAN}, {"INTERSECTIONS", UI_CYAN}, {"PED", UI_CYAN},
         {"CONNECTIONS", UI_CYAN}, {"RECENT EVENTS", UI_CYAN}, {"CONTROLS", UI_CYAN}
     };
     size_t i;
@@ -94,6 +95,7 @@ static const char *inline_key_color(const char *cursor, size_t *length) {
 
 static void render_line(const char *line, int color) {
     const char *cursor = line;
+    unsigned lamp_slot = 0;
     if (color && (*line == '+' || (line[0] == '|' && line[1] == '-' && line[2] == '-'))) {
         fputs(UI_DIM_CYAN, stdout);
         fputs(line, stdout);
@@ -102,7 +104,38 @@ static void render_line(const char *line, int color) {
     }
     while (*cursor) {
         size_t length = 0;
-        const char *prefix = color ? inline_key_color(cursor, &length) : NULL;
+        const char *prefix = NULL;
+
+        /* Fixed-width traffic bulbs from the live map.  {O} is active and {o}
+           inactive. The bulb's position in each R/Y/G triplet selects color;
+           ANSI bytes never participate in layout width. */
+        if ((!strncmp(cursor, "{O}", 3) || !strncmp(cursor, "{o}", 3)) && color) {
+            static const char *active_colors[] = {UI_RED, UI_YELLOW, UI_GREEN};
+            const int active = cursor[1] == 'O';
+            fputs(active ? active_colors[lamp_slot % 3] : UI_DIM_WHITE, stdout);
+            fwrite(cursor, 1, 3, stdout);
+            fputs(UI_RESET, stdout);
+            cursor += 3;
+            ++lamp_slot;
+            continue;
+        }
+        if (!strncmp(cursor, "{?}", 3) && color) {
+            fputs(UI_YELLOW, stdout);
+            fwrite(cursor, 1, 3, stdout);
+            fputs(UI_RESET, stdout);
+            cursor += 3;
+            ++lamp_slot;
+            continue;
+        }
+        if (color && (!strncmp(cursor, "[>>>]", 5) || !strncmp(cursor, "[<<<]", 5))) {
+            fputs(UI_MAGENTA, stdout);
+            fwrite(cursor, 1, 5, stdout);
+            fputs(UI_RESET, stdout);
+            cursor += 5;
+            continue;
+        }
+
+        prefix = color ? inline_key_color(cursor, &length) : NULL;
         if (!prefix) prefix = color ? keyword_color(line, cursor, &length) : NULL;
         if (prefix && length) {
             fputs(prefix, stdout);
@@ -218,9 +251,9 @@ static void print_quick_menu(int color) {
     print_menu_border(color);
 
     print_menu_text("VIEW / MONITOR", color);
-    print_menu_text("[L] Live Dashboard             [S] Status Snapshot", color);
-    print_menu_text("[E] Recent Events              [F] Active Faults", color);
-    print_menu_text("[C] Command History", color);
+    print_menu_text("[L] Live Traffic Map           [D] Live Detailed Dashboard", color);
+    print_menu_text("[S] Status Snapshot            [E] Recent Events", color);
+    print_menu_text("[F] Active Faults              [C] Command History", color);
     print_menu_border(color);
 
     print_menu_text("TRAFFIC MODE  -  SELECT INTERSECTION", color);
@@ -252,16 +285,17 @@ static void print_quick_menu(int color) {
  * language. Returns 1 when translated, 0 when the input should be forwarded
  * unchanged, 2 for local UI actions (menu/watch/quit). */
 static int translate_shortcut(const char *input, char *output, size_t size,
-                              int *start_watch, int *quit_ui, int *show_menu) {
+                              int *watch_mode, int *quit_ui, int *show_menu) {
     char key[32];
     size_t i, length = strlen(input);
     if (length >= sizeof(key)) return 0;
     for (i = 0; i <= length; ++i) key[i] = (char)toupper((unsigned char)input[i]);
 
-    *start_watch = *quit_ui = *show_menu = 0;
+    *watch_mode = *quit_ui = *show_menu = 0;
 
     /* Presentation shortcuts. Numeric aliases remain accepted for compatibility. */
-    if (!strcmp(key, "L") || !strcmp(key, "1")) { *start_watch = 1; return 2; }
+    if (!strcmp(key, "L") || !strcmp(key, "1")) { *watch_mode = 1; return 2; }
+    if (!strcmp(key, "D")) { *watch_mode = 2; return 2; }
     if (!strcmp(key, "S") || !strcmp(key, "2")) { snprintf(output, size, "status"); return 1; }
     if (!strcmp(key, "E") || !strcmp(key, "3")) { snprintf(output, size, "events"); return 1; }
     if (!strcmp(key, "F") || !strcmp(key, "4")) { snprintf(output, size, "faults"); return 1; }
@@ -292,7 +326,7 @@ static int translate_shortcut(const char *input, char *output, size_t size,
 static void usage(const char *program) {
     printf("Usage: %s [-n local-service] [--no-color] [-c command]\n"
            "Separate Central display, build %s (%s %s).\n"
-           "watch refreshes status once per second; Enter stops watch.\n"
+           "L opens the live map; D opens live detailed status; both refresh once per second.\n"
            "status, help, commands, faults and events inspect the core.\n"
            "Other commands are forwarded once. quit closes only this UI.\n"
            "shutdown requests that the core stop.\n", program, CENTRAL_BUILD_VERSION, __DATE__, __TIME__);
@@ -302,10 +336,11 @@ int main(int argc, char **argv) {
     const char *name = CENTRAL_UI_SERVICE;
     const char *once = NULL;
     int color = isatty(STDOUT_FILENO) && getenv("NO_COLOR") == NULL;
-    int watching = 0, overflow = 0;
+    int watching = 0, overflow = 0; /* 0 none, 1 map, 2 detailed */
     size_t used = 0;
     char line[CENTRAL_UI_REQUEST_SIZE];
     uint64_t next_refresh = 0;
+    int map_frame_drawn = 0;
     struct sigaction action;
     for (int i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) { usage(argv[0]); return EXIT_SUCCESS; }
@@ -332,10 +367,17 @@ int main(int argc, char **argv) {
         int ready;
         uint64_t now = monotonic_ns();
         if (watching && now >= next_refresh) {
-            if (color) fputs("\033[2J\033[H", stdout);
-            request_core(name, "status", color);
-            printf("Live view: Enter stops refresh; Central continues if this UI exits.\n");
+            if (color) {
+                /* The map has a fixed row/column footprint. After its first frame,
+                   return the cursor home instead of clearing the screen so lamp
+                   color changes cannot make the box jump or flicker. */
+                if (watching == 1 && map_frame_drawn) fputs("\033[H", stdout);
+                else fputs("\033[2J\033[H", stdout);
+            }
+            request_core(name, watching == 1 ? "map" : "status", color);
+            printf("Live view: commands stay in this view; blank Enter pauses refresh.\n");
             fflush(stdout);
+            map_frame_drawn = watching == 1;
             next_refresh = monotonic_ns() + 1000000000ULL;
         }
         ready = poll(&input, 1, 100);
@@ -353,33 +395,43 @@ int main(int argc, char **argv) {
                     size_t length = strlen(command);
                     while (length && (command[length - 1] == '\r' || command[length - 1] == ' ' ||
                                       command[length - 1] == '\t')) command[--length] = '\0';
-                    if (watching) {
+                    if (overflow) puts("Command too long; request was not sent.");
+                    else if (!*command && watching) {
                         watching = 0;
-                        if (color) fputs("\033[?25h", stdout);
-                        puts("Live view stopped.");
+                        map_frame_drawn = 0;
+                        puts("Live view paused.");
                     }
-                    else if (overflow) puts("Command too long; request was not sent.");
                     else if (*command) {
                         char translated[CENTRAL_UI_REQUEST_SIZE];
-                        int start_watch = 0, quit_ui = 0, show_menu = 0;
+                        int watch_mode = 0, quit_ui = 0, show_menu = 0;
                         int shortcut = translate_shortcut(command, translated, sizeof(translated),
-                                                          &start_watch, &quit_ui, &show_menu);
+                                                          &watch_mode, &quit_ui, &show_menu);
                         if (shortcut == 2) {
                             if (quit_ui) interrupted = 1;
-                            else if (show_menu) print_quick_menu(color);
-                            else if (start_watch) {
-                                watching = 1;
-                                next_refresh = 0;
-                                if (color) fputs("\033[?25l", stdout);
+                            else if (show_menu) {
+                                watching = 0;
+                                map_frame_drawn = 0;
+                                print_quick_menu(color);
                             }
-                        } else if (shortcut == 1) request_core(name, translated, color);
+                            else if (watch_mode) {
+                                watching = watch_mode;
+                                map_frame_drawn = 0;
+                                next_refresh = 0;
+                            }
+                        } else if (shortcut == 1) {
+                            request_core(name, translated, color);
+                            if (watching) { map_frame_drawn = 0; next_refresh = 0; }
+                        }
                         else if (!strcmp(command, "quit")) interrupted = 1;
                         else if (!strcmp(command, "watch")) {
-                            watching = 1;
+                            watching = 2;
+                            map_frame_drawn = 0;
                             next_refresh = 0;
-                            if (color) fputs("\033[?25l", stdout);
                         }
-                        else request_core(name, command, color);
+                        else {
+                            request_core(name, command, color);
+                            if (watching) { map_frame_drawn = 0; next_refresh = 0; }
+                        }
                     }
                     used = 0;
                     overflow = 0;

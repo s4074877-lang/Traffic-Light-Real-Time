@@ -85,6 +85,9 @@ typedef struct {
 
 static central_state_t state;
 static central_ipc_mode_t display_mode = CENTRAL_IPC_LOCAL;
+/* Presentation-only schematic direction. Updated when Central sends train-up/down.
+   It never affects railway safety or shared protocol behaviour. */
+static int display_train_direction = 1; /* +1 => >>>, -1 => <<< */
 static volatile sig_atomic_t interrupted;
 static atomic_int shutdown_requested;
 /* Only the operator thread reads/writes this flag. */
@@ -149,7 +152,7 @@ static const char *ui_keyword_color(const char *start, const char *cursor, size_
         {"P1", UI_MAGENTA}, {"P2", UI_MAGENTA}, {"P3", UI_MAGENTA},
         {"SENSORS", UI_BLUE}, {"SENSOR", UI_BLUE}, {"FIXED", UI_CYAN}, {"GLOBAL", UI_CYAN},
         {"LOCAL", UI_CYAN}, {"SNAPSHOT", UI_WHITE}, {"LIVE VIEW", UI_WHITE},
-        {"CENTRAL CONTROL ROOM", UI_CYAN}, {"INTERSECTIONS", UI_CYAN},
+        {"CENTRAL CONTROL ROOM", UI_CYAN}, {"LIVE TRAFFIC MAP", UI_CYAN}, {"INTERSECTIONS", UI_CYAN},
         {"CONNECTIONS", UI_CYAN}, {"RECENT EVENTS", UI_CYAN}, {"CONTROLS", UI_CYAN}
     };
     size_t i;
@@ -359,8 +362,8 @@ static void print_help(void) {
            "  train-cmd <train-up|train-down|train P# up/down|noexit P# up/down>\n"
            "  train-cmd <stuck P#|reset P#|test [1..9]|scale 1..100|status>\n"
            "  schedule | schedule-resume <I1..I6|all> | version\n"
-           "  status | commands | faults | events | help | quit\n"
-           "  watch  (live status; press Enter to return to the prompt)\n"
+           "  map | status | commands | faults | events | help | quit\n"
+           "  watch  (legacy live detailed status)\n"
            "Queued commands expire after %u seconds. ACCEPTED means receipt only.\n",
            COMMAND_MAX_WAIT_SEC);
     output("Train commands simulate sensor/fault events; Train owns gate safety.\n"
@@ -370,6 +373,167 @@ static void print_help(void) {
            "Direct p#-fault is blocked: the current Train remote handler can deadlock.\n"
            "Current Local stores validated coordination offsets and applies them at a safe phase boundary.\n"
            "coordinate-at sets a Central dispatch time; v1 has no shared activation epoch.\n");
+}
+
+
+static void map_lamps(char *buffer, size_t size, unsigned state) {
+    if (!buffer || !size) return;
+    if (state > LIGHT_GREEN) {
+        snprintf(buffer, size, "{?}{?}{?}");
+        return;
+    }
+    snprintf(buffer, size, "{%c}{%c}{%c}",
+             state == LIGHT_RED ? 'O' : 'o',
+             state == LIGHT_YELLOW ? 'O' : 'o',
+             state == LIGHT_GREEN ? 'O' : 'o');
+}
+
+static const char *map_ped_state(unsigned walk, unsigned request) {
+    /* Fixed-width six-character tokens keep every live-map card aligned.
+       WALK is the actual Local pedestrian output; REQ is a latched request
+       waiting for a safe compatible phase; STOP is the normal don't-walk state. */
+    if (walk) return "[WALK]";
+    if (request) return "[REQ ]";
+    return "[STOP]";
+}
+
+static const char *map_train_state(unsigned state_value) {
+    static const char *names[] = {"NONE", "APPROACHING", "AT CROSSING", "CLEAR"};
+    return state_value <= TRAIN_CLEAR ? names[state_value] : "UNKNOWN";
+}
+
+static const char *map_gate_state(unsigned state_value) {
+    static const char *names[] = {"OPEN", "CLOSING", "CLOSED", "OPENING", "FAULT"};
+    return state_value <= GATE_FAULT ? names[state_value] : "UNKNOWN";
+}
+
+static void map_train_canvas(char *buffer, size_t size,
+                             const central_monitor_t *view) {
+    enum { WIDTH = 76, SPRITE = 14 };
+    /* Rail canvas aligns exactly under the three card connector columns. */
+    static const int crossing_center[NUM_CROSSINGS] = {10, 37, 64};
+    static const char right_sprite[] = "{[>>>][>>>]}\\\\";
+    static const char left_sprite[]  = "//{[<<<][<<<]}";
+    int active = -1, at_crossing = 0, start, i;
+    const char *sprite;
+
+    if (!buffer || size < WIDTH + 1 || !view) return;
+    memset(buffer, '.', WIDTH);
+    buffer[WIDTH] = '\0';
+
+    for (i = 0; i < NUM_CROSSINGS; ++i) {
+        if (!view->crossings[i].valid) continue;
+        if (view->crossings[i].status.train_state == TRAIN_AT_CROSSING) {
+            active = i;
+            at_crossing = 1;
+            break;
+        }
+        if (active < 0 && view->crossings[i].status.train_state == TRAIN_APPROACHING)
+            active = i;
+    }
+    if (active < 0) return;
+
+    sprite = display_train_direction >= 0 ? right_sprite : left_sprite;
+    if (at_crossing) start = crossing_center[active] - SPRITE / 2;
+    else if (display_train_direction >= 0) start = crossing_center[active] - SPRITE - 3;
+    else start = crossing_center[active] + 3;
+    if (start < 0) start = 0;
+    if (start + SPRITE > WIDTH) start = WIDTH - SPRITE;
+    memcpy(buffer + start, sprite, SPRITE);
+}
+
+static void display_map(void) {
+    central_monitor_t view;
+    uint64_t now;
+    int local_online, train_online;
+    char ns[NUM_INTERSECTIONS][16], ew[NUM_INTERSECTIONS][16];
+    const char *ped_ns[NUM_INTERSECTIONS], *ped_ew[NUM_INTERSECTIONS];
+    char train_canvas[77];
+    unsigned i;
+
+    pthread_mutex_lock(&state.mutex);
+    view = state.monitor;
+    pthread_mutex_unlock(&state.mutex);
+
+    now = central_monotonic_ns();
+    local_online = central_peer_online(&view, CONTROLLER_LOCAL, now);
+    train_online = central_peer_online(&view, CONTROLLER_TRAIN, now);
+
+    for (i = 0; i < NUM_INTERSECTIONS; ++i) {
+        if (!view.intersections[i].valid) {
+            snprintf(ns[i], sizeof(ns[i]), "{?}{?}{?}");
+            snprintf(ew[i], sizeof(ew[i]), "{?}{?}{?}");
+            ped_ns[i] = "[----]";
+            ped_ew[i] = "[----]";
+        } else {
+            const status_msg_t *status = &view.intersections[i].status;
+            map_lamps(ns[i], sizeof(ns[i]), status->ns_state);
+            map_lamps(ew[i], sizeof(ew[i]), status->ew_state);
+            ped_ns[i] = map_ped_state((unsigned)status->pedestrian_ns,
+                                      (unsigned)status->pedestrian_ns_request);
+            ped_ew[i] = map_ped_state((unsigned)status->pedestrian_ew,
+                                      (unsigned)status->pedestrian_ew_request);
+        }
+    }
+    map_train_canvas(train_canvas, sizeof(train_canvas), &view);
+
+    dashboard_rendering = 1;
+    ui_panel("LIVE TRAFFIC MAP  |  SCHEMATIC VIEW - I1..I6 / P1..P3");
+    ui_rowf("Fixed-width lamps/ped signals: active color only | [WALK]/[STOP]/[REQ ] from Local telemetry | railway horizontal");
+    ui_rowf("");
+    ui_rowf("%24s%27s%27s", "I1", "I3", "I5");
+    ui_rowf("            +--------------------+     +--------------------+     +--------------------+");
+    ui_rowf("            | N-S %-9s      |     | N-S %-9s      |     | N-S %-9s      |", ns[0], ns[2], ns[4]);
+    ui_rowf("            |      R  Y  G       |     |      R  Y  G       |     |      R  Y  G       |");
+    ui_rowf("            |                    |     |                    |     |                    |");
+    ui_rowf("            | E-W %-9s      |     | E-W %-9s      |     | E-W %-9s      |", ew[0], ew[2], ew[4]);
+    ui_rowf("            |      R  Y  G       |     |      R  Y  G       |     |      R  Y  G       |");
+    ui_rowf("            | PED N-S %-6s     |     | PED N-S %-6s     |     | PED N-S %-6s     |", ped_ns[0], ped_ns[2], ped_ns[4]);
+    ui_rowf("            | PED E-W %-6s     |     | PED E-W %-6s     |     | PED E-W %-6s     |", ped_ew[0], ped_ew[2], ped_ew[4]);
+    ui_rowf("            +---------+----------+     +---------+----------+     +---------+----------+");
+    ui_rowf("                      |                          |                          |");
+    ui_rowf("            =========P1=========================P2=========================P3===========");
+    ui_rowf("            %s", train_canvas);
+    ui_rowf("            ============================================================================");
+    ui_rowf("                      |                          |                          |");
+    ui_rowf("            +---------+----------+     +---------+----------+     +---------+----------+");
+    ui_rowf("            | N-S %-9s      |     | N-S %-9s      |     | N-S %-9s      |", ns[1], ns[3], ns[5]);
+    ui_rowf("            |      R  Y  G       |     |      R  Y  G       |     |      R  Y  G       |");
+    ui_rowf("            |                    |     |                    |     |                    |");
+    ui_rowf("            | E-W %-9s      |     | E-W %-9s      |     | E-W %-9s      |", ew[1], ew[3], ew[5]);
+    ui_rowf("            |      R  Y  G       |     |      R  Y  G       |     |      R  Y  G       |");
+    ui_rowf("            | PED N-S %-6s     |     | PED N-S %-6s     |     | PED N-S %-6s     |", ped_ns[1], ped_ns[3], ped_ns[5]);
+    ui_rowf("            | PED E-W %-6s     |     | PED E-W %-6s     |     | PED E-W %-6s     |", ped_ew[1], ped_ew[3], ped_ew[5]);
+    ui_rowf("            +--------------------+     +--------------------+     +--------------------+");
+    ui_rowf("%24s%27s%27s", "I2", "I4", "I6");
+    ui_rowf("");
+
+    ui_panel("RAILWAY CROSSINGS  |  LIVE STATE");
+    for (i = 0; i < NUM_CROSSINGS; ++i) {
+        const central_crossing_status_t *entry = &view.crossings[i];
+        if (!entry->valid) {
+            ui_rowf("P%u  %-12s | GATE %-8s | HEALTH %-8s | LINK %-4s",
+                    i + 1, "WAITING", "--", "UNKNOWN", train_online ? "UP" : "DOWN");
+        } else {
+            ui_rowf("P%u  %-12s | GATE %-8s | HEALTH %-8s | LINK %-4s",
+                    i + 1, map_train_state(entry->status.train_state),
+                    map_gate_state(entry->status.gate_state),
+                    ui_health(&view, CONTROLLER_TRAIN, i), train_online ? "UP" : "DOWN");
+        }
+    }
+
+    ui_panel("SYSTEM STATUS  |  DISTRIBUTED HEALTH");
+    ui_rowf("LOCAL %-12s | TRAIN %-12s | SYSTEM %-10s | TRAIN DIRECTION %s",
+            ui_connection(&view.peers[0], local_online),
+            ui_connection(&view.peers[1], train_online),
+            local_online && train_online ? "HEALTHY" : "DEGRADED",
+            display_train_direction >= 0 ? ">>>" : "<<<");
+
+    ui_panel("LIVE CONTROLS  |  TYPE COMMAND THEN ENTER - MAP CONTINUES");
+    ui_rowf("[F1-F6] FIXED | [S1-S6] SENSOR | [TU] TRAIN >>> | [TD] TRAIN <<< | [E] EVENTS | [D] DETAILS");
+    ui_rowf("[M] MENU | [H] HELP | [0] QUIT DISPLAY | blank ENTER pauses live refresh");
+    ui_border();
+    dashboard_rendering = 0;
 }
 
 static void display_ui(void) {
@@ -493,9 +657,9 @@ static void display_ui(void) {
     if (log_failed) ui_rowf("EVENT LOG FAILED: new events are not being saved.");
 
     ui_panel("CONTROLS  |  QUICK KEYS");
-    ui_rowf("[L] LIVE DASHBOARD   [S] STATUS   [E] EVENTS   [F] FAULTS   [C] HISTORY");
-    ui_rowf("[M] MENU             [H] FULL HELP                     [0] QUIT DISPLAY");
-    ui_rowf("LIVE VIEW: press ENTER to stop refresh before using another shortcut.");
+    ui_rowf("[L] LIVE MAP   [D] LIVE DETAILS   [S] STATUS   [E] EVENTS   [F] FAULTS   [C] HISTORY");
+    ui_rowf("[M] MENU       [H] FULL HELP                             [0] QUIT DISPLAY");
+    ui_rowf("Live map/details refresh every 1.0s; mutating commands remain Central supervisory requests.");
     ui_border();
 
     dashboard_rendering = 0;
@@ -1083,7 +1247,8 @@ static void execute_command(char *line) {
     command_result = 0;
     line = trim_command(line);
     if (!*line) return;
-    if (!strcmp(line, "status")) display_ui();
+    if (!strcmp(line, "map")) display_map();
+    else if (!strcmp(line, "status")) display_ui();
     else if (!strcmp(line, "commands")) print_commands();
     else if (!strcmp(line, "faults")) print_faults();
     else if (!strcmp(line, "events")) print_events();
@@ -1121,6 +1286,12 @@ static void execute_command(char *line) {
             central_message_init(&message, MSG_TEST, CONTROLLER_CENTRAL, CONTROLLER_TRAIN);
             memcpy(message.data, payload, sizeof(payload));
             command_result = enqueue_command(&message, 0, 0, 0);
+            if (command_result == 0) {
+                if (!strcmp(payload, "train-up") || strstr(payload, " up"))
+                    display_train_direction = 1;
+                else if (!strcmp(payload, "train-down") || strstr(payload, " down"))
+                    display_train_direction = -1;
+            }
         }
     }
     else if (!strncmp(line, "coordinate-at ", 14)) {
