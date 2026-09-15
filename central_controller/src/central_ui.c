@@ -24,40 +24,93 @@ static uint64_t monotonic_ns(void) {
     return (uint64_t)now.tv_sec * 1000000000ULL + (uint64_t)now.tv_nsec;
 }
 
-static const char *line_color(const char *line) {
-    if (strstr(line, "FAULT") || strstr(line, "DEGRADED") || strstr(line, "OFFLINE") ||
-        strstr(line, "LOST") || strstr(line, "DOWN") || strstr(line, "REJECTED") ||
-        strstr(line, "DISCONNECTED") || strstr(line, "RAIL HOLD")) return "\033[1;31m";
-    if (strstr(line, "STALE") || strstr(line, "WAITING") || strstr(line, "waiting") ||
-        strstr(line, "UNKNOWN") || strstr(line, "UNCONFIRMED") || strstr(line, "CLOSING") ||
-        strstr(line, "CLOSED") || strstr(line, "HOLD")) return "\033[1;33m";
-    if (strstr(line, "CENTRAL CONTROL ROOM") || strstr(line, "INTERSECTIONS") ||
-        strstr(line, "RAILWAY /") || strstr(line, "CONNECTIONS") ||
-        strstr(line, "RECENT EVENTS") || strstr(line, "CONTROLS")) return "\033[1;36m";
-    if (strstr(line, "P1") || strstr(line, "P2") || strstr(line, "P3") ||
-        strstr(line, "RAILWAY") || strstr(line, "TRAIN")) return "\033[1;35m";
-    if (strstr(line, "CURRENT") || strstr(line, "CONNECTED") || strstr(line, "HEALTHY") ||
-        strstr(line, "HEARTBEAT OK") || strstr(line, "CLEAR") || strstr(line, "OPEN") ||
-        strstr(line, "GREEN") || strstr(line, "WALK") || strstr(line, "ONLINE") ||
-        strstr(line, "OPERATIONAL")) return "\033[1;32m";
-    return "";
+#define UI_RESET       "\033[0m"
+#define UI_DIM_CYAN    "\033[2;36m"
+#define UI_RED         "\033[1;31m"
+#define UI_GREEN       "\033[1;32m"
+#define UI_YELLOW      "\033[1;33m"
+#define UI_BLUE        "\033[1;34m"
+#define UI_MAGENTA     "\033[1;35m"
+#define UI_CYAN        "\033[1;36m"
+#define UI_WHITE       "\033[1;37m"
+
+static int word_char(unsigned char c) {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+           (c >= '0' && c <= '9') || c == '_';
+}
+
+static int keyword_match(const char *start, const char *cursor, const char *keyword) {
+    size_t length = strlen(keyword);
+    if (strncmp(cursor, keyword, length) != 0) return 0;
+    if (cursor != start && word_char((unsigned char)cursor[-1])) return 0;
+    if (word_char((unsigned char)keyword[length - 1]) &&
+        word_char((unsigned char)cursor[length])) return 0;
+    return 1;
+}
+
+static const char *keyword_color(const char *start, const char *cursor, size_t *length) {
+    static const struct { const char *text; const char *color; } tokens[] = {
+        {"CONFLICTING GREENS", UI_RED}, {"DISCONNECTED", UI_RED},
+        {"HEARTBEAT OK", UI_GREEN}, {"WAITING UPDATE", UI_YELLOW},
+        {"AT CROSSING", UI_MAGENTA}, {"RAIL HOLD", UI_RED},
+        {"OPERATIONAL", UI_GREEN}, {"APPROACHING", UI_MAGENTA},
+        {"DEGRADED", UI_RED}, {"OFFLINE", UI_RED}, {"LOST", UI_RED},
+        {"FAULT", UI_RED}, {"FAILSAFE", UI_RED}, {"NO REPORT", UI_YELLOW}, {"NO DATA", UI_YELLOW},
+        {"STOP", UI_RED}, {"RED", UI_RED},
+        {"CLOSED", UI_YELLOW}, {"CLOSING", UI_YELLOW},
+        {"STALE", UI_YELLOW}, {"WAITING", UI_YELLOW}, {"UNKNOWN", UI_YELLOW},
+        {"YELLOW", UI_YELLOW}, {"HOLD", UI_YELLOW}, {"STANDBY", UI_YELLOW},
+        {"CONNECTED", UI_GREEN}, {"HEALTHY", UI_GREEN}, {"CURRENT", UI_GREEN},
+        {"ONLINE", UI_GREEN}, {"CLEAR", UI_GREEN}, {"GREEN", UI_GREEN},
+        {"WALK", UI_GREEN}, {"OPENING", UI_GREEN}, {"OPEN", UI_GREEN},
+        {"UP", UI_GREEN}, {"RUN", UI_GREEN}, {"READY", UI_GREEN},
+        {"RAILWAY", UI_MAGENTA}, {"TRAIN", UI_MAGENTA}, {"ACTIVE", UI_MAGENTA},
+        {"P1", UI_MAGENTA}, {"P2", UI_MAGENTA}, {"P3", UI_MAGENTA},
+        {"SENSORS", UI_BLUE}, {"SENSOR", UI_BLUE}, {"FIXED", UI_CYAN}, {"GLOBAL", UI_CYAN},
+        {"LOCAL", UI_CYAN}, {"SNAPSHOT", UI_WHITE}, {"LIVE VIEW", UI_WHITE},
+        {"CENTRAL CONTROL ROOM", UI_CYAN}, {"INTERSECTIONS", UI_CYAN},
+        {"CONNECTIONS", UI_CYAN}, {"RECENT EVENTS", UI_CYAN}, {"CONTROLS", UI_CYAN}
+    };
+    size_t i;
+    for (i = 0; i < sizeof(tokens) / sizeof(tokens[0]); ++i) {
+        if (keyword_match(start, cursor, tokens[i].text)) {
+            *length = strlen(tokens[i].text);
+            return tokens[i].color;
+        }
+    }
+    *length = 0;
+    return NULL;
+}
+
+static void render_line(const char *line, int color) {
+    const char *cursor = line;
+    if (color && (*line == '+' || (line[0] == '|' && line[1] == '-' && line[2] == '-'))) {
+        fputs(UI_DIM_CYAN, stdout);
+        fputs(line, stdout);
+        fputs(UI_RESET, stdout);
+        return;
+    }
+    while (*cursor) {
+        size_t length = 0;
+        const char *prefix = color ? keyword_color(line, cursor, &length) : NULL;
+        if (prefix && length) {
+            fputs(prefix, stdout);
+            fwrite(cursor, 1, length, stdout);
+            fputs(UI_RESET, stdout);
+            cursor += length;
+        } else {
+            unsigned char c = (unsigned char)*cursor++;
+            if (c >= 32 || c == '\t') putchar(c);
+        }
+    }
 }
 
 static void render(char *text, int color) {
     char *line = text;
     while (*line) {
         char *end = strchr(line, '\n');
-        const char *prefix;
         if (end) *end = '\0';
-        prefix = color ? line_color(line) : "";
-        fputs(prefix, stdout);
-        /* The UI owns terminal escape sequences. Strip controls from report
-         * strings to prevent peer-supplied descriptions from moving the cursor. */
-        for (char *p = line; *p; ++p) {
-            unsigned char c = (unsigned char)*p;
-            if (c >= 32 || c == '\t') putchar(c);
-        }
-        if (*prefix) fputs("\033[0m", stdout);
+        render_line(line, color);
         if (!end) break;
         putchar('\n');
         line = end + 1;

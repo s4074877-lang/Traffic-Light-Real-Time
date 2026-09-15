@@ -1,3 +1,4 @@
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -101,6 +102,100 @@ static uint16_t policy_command[NUM_INTERSECTIONS], policy_ack[NUM_INTERSECTIONS]
 static _Thread_local char *output_buffer;
 static _Thread_local size_t output_capacity, output_used;
 static _Thread_local int output_truncated, command_result;
+static _Thread_local int dashboard_rendering;
+
+#define UI_RESET       "\033[0m"
+#define UI_BOLD        "\033[1m"
+#define UI_DIM         "\033[2m"
+#define UI_RED         "\033[1;31m"
+#define UI_GREEN       "\033[1;32m"
+#define UI_YELLOW      "\033[1;33m"
+#define UI_BLUE        "\033[1;34m"
+#define UI_MAGENTA     "\033[1;35m"
+#define UI_CYAN        "\033[1;36m"
+#define UI_WHITE       "\033[1;37m"
+
+static int ui_word_char(unsigned char c) {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+           (c >= '0' && c <= '9') || c == '_';
+}
+
+static int ui_keyword_match(const char *start, const char *cursor, const char *keyword) {
+    size_t length = strlen(keyword);
+    if (strncmp(cursor, keyword, length) != 0) return 0;
+    if (cursor != start && ui_word_char((unsigned char)cursor[-1])) return 0;
+    if (ui_word_char((unsigned char)keyword[length - 1]) &&
+        ui_word_char((unsigned char)cursor[length])) return 0;
+    return 1;
+}
+
+static const char *ui_keyword_color(const char *start, const char *cursor, size_t *length) {
+    static const struct { const char *text; const char *color; } tokens[] = {
+        {"CONFLICTING GREENS", UI_RED}, {"DISCONNECTED", UI_RED},
+        {"HEARTBEAT OK", UI_GREEN}, {"WAITING UPDATE", UI_YELLOW},
+        {"AT CROSSING", UI_MAGENTA}, {"RAIL HOLD", UI_RED},
+        {"OPERATIONAL", UI_GREEN}, {"APPROACHING", UI_MAGENTA},
+        {"DEGRADED", UI_RED}, {"OFFLINE", UI_RED}, {"LOST", UI_RED},
+        {"FAULT", UI_RED}, {"FAILSAFE", UI_RED}, {"NO REPORT", UI_YELLOW}, {"NO DATA", UI_YELLOW},
+        {"STOP", UI_RED}, {"RED", UI_RED},
+        {"CLOSED", UI_YELLOW}, {"CLOSING", UI_YELLOW},
+        {"STALE", UI_YELLOW}, {"WAITING", UI_YELLOW}, {"UNKNOWN", UI_YELLOW},
+        {"YELLOW", UI_YELLOW}, {"HOLD", UI_YELLOW}, {"STANDBY", UI_YELLOW},
+        {"CONNECTED", UI_GREEN}, {"HEALTHY", UI_GREEN}, {"CURRENT", UI_GREEN},
+        {"ONLINE", UI_GREEN}, {"CLEAR", UI_GREEN}, {"GREEN", UI_GREEN},
+        {"WALK", UI_GREEN}, {"OPENING", UI_GREEN}, {"OPEN", UI_GREEN},
+        {"UP", UI_GREEN}, {"RUN", UI_GREEN}, {"READY", UI_GREEN},
+        {"RAILWAY", UI_MAGENTA}, {"TRAIN", UI_MAGENTA}, {"ACTIVE", UI_MAGENTA},
+        {"P1", UI_MAGENTA}, {"P2", UI_MAGENTA}, {"P3", UI_MAGENTA},
+        {"SENSORS", UI_BLUE}, {"SENSOR", UI_BLUE}, {"FIXED", UI_CYAN}, {"GLOBAL", UI_CYAN},
+        {"LOCAL", UI_CYAN}, {"SNAPSHOT", UI_WHITE}, {"LIVE VIEW", UI_WHITE},
+        {"CENTRAL CONTROL ROOM", UI_CYAN}, {"INTERSECTIONS", UI_CYAN},
+        {"CONNECTIONS", UI_CYAN}, {"RECENT EVENTS", UI_CYAN}, {"CONTROLS", UI_CYAN}
+    };
+    size_t i;
+    for (i = 0; i < sizeof(tokens) / sizeof(tokens[0]); ++i) {
+        if (ui_keyword_match(start, cursor, tokens[i].text)) {
+            *length = strlen(tokens[i].text);
+            return tokens[i].color;
+        }
+    }
+    *length = 0;
+    return NULL;
+}
+
+static void ui_console_write(const char *text) {
+    const char *line = text, *cursor = text;
+    while (*cursor) {
+        if (cursor == line && (*cursor == '+' ||
+            (cursor[0] == '|' && cursor[1] == '-' && cursor[2] == '-'))) {
+            const char *end = strchr(cursor, '\n');
+            size_t length = end ? (size_t)(end - cursor) : strlen(cursor);
+            fputs(UI_DIM "\033[36m", stdout);
+            fwrite(cursor, 1, length, stdout);
+            fputs(UI_RESET, stdout);
+            cursor += length;
+            if (*cursor == '\n') { putchar('\n'); ++cursor; line = cursor; }
+            continue;
+        }
+        if (*cursor == '\n') {
+            putchar('\n');
+            ++cursor;
+            line = cursor;
+            continue;
+        }
+        size_t length = 0;
+        const char *color = ui_keyword_color(line, cursor, &length);
+        if (color && length) {
+            fputs(color, stdout);
+            fwrite(cursor, 1, length, stdout);
+            fputs(UI_RESET, stdout);
+            cursor += length;
+        } else {
+            putchar((unsigned char)*cursor++);
+        }
+    }
+}
+
 static void output(const char *format, ...) {
     va_list args;
     va_start(args, format);
@@ -113,7 +208,13 @@ static void output(const char *format, ...) {
                 output_used += (size_t)count < left ? (size_t)count : left - 1;
             }
         }
-    } else vprintf(format, args);
+    } else if (dashboard_rendering && isatty(STDOUT_FILENO) && getenv("NO_COLOR") == NULL) {
+        char text[2048];
+        vsnprintf(text, sizeof(text), format, args);
+        ui_console_write(text);
+    } else {
+        vprintf(format, args);
+    }
     va_end(args);
 }
 
@@ -179,10 +280,34 @@ static double age_seconds(uint64_t now, uint64_t received) {
     return now >= received ? (double)(now - received) / CENTRAL_NSEC : 0.0;
 }
 
+#define UI_INNER_WIDTH 104
+
+static void ui_border(void) {
+    char line[UI_INNER_WIDTH + 5];
+    size_t i;
+    line[0] = '+';
+    for (i = 0; i < UI_INNER_WIDTH + 2; ++i) line[i + 1] = '-';
+    line[UI_INNER_WIDTH + 3] = '+';
+    line[UI_INNER_WIDTH + 4] = '\0';
+    output("%s\n", line);
+}
+
+static void ui_rowf(const char *format, ...) {
+    char content[512];
+    va_list args;
+    size_t length;
+    va_start(args, format);
+    vsnprintf(content, sizeof(content), format, args);
+    va_end(args);
+    length = strlen(content);
+    if (length > UI_INNER_WIDTH) content[UI_INNER_WIDTH] = '\0';
+    output("| %-*.*s |\n", UI_INNER_WIDTH, UI_INNER_WIDTH, content);
+}
+
 static void ui_panel(const char *title) {
-    output("+----------------------------------------------------------------------------+\n");
-    output("| %-74s |\n", title);
-    output("+----------------------------------------------------------------------------+\n");
+    ui_border();
+    ui_rowf("%s", title);
+    ui_border();
 }
 
 static const char *ui_connection(const central_peer_status_t *peer, int online) {
@@ -256,6 +381,7 @@ static void display_ui(void) {
     int connected[MAX_PEERS];
     uint64_t probes[MAX_PEERS];
     uint64_t now;
+    int local_online, train_online;
     pthread_mutex_lock(&state.mutex);
     view = state.monitor;
     memcpy(events, state.recent, sizeof(events));
@@ -268,109 +394,110 @@ static void display_ui(void) {
     memcpy(probes, state.endpoint_probe, sizeof(probes));
     pthread_mutex_unlock(&state.mutex);
     now = central_monotonic_ns();
+    local_online = central_peer_online(&view, CONTROLLER_LOCAL, now);
+    train_online = central_peer_online(&view, CONTROLLER_TRAIN, now);
+
     if (!output_buffer && watching && isatty(STDOUT_FILENO)) output("\033[2J\033[H");
+    dashboard_rendering = 1;
+
     ui_panel("CENTRAL CONTROL ROOM  |  LIVE SUPERVISORY DASHBOARD");
-    output("| Node: VM3  | Mode: %-6s | System: %-11s | Build: %-10s | %-9s |\n",
-           mode == CENTRAL_IPC_GLOBAL ? "GLOBAL" : "LOCAL",
-           "ONLINE", CENTRAL_BUILD_VERSION,
-           watching ? "LIVE VIEW" : "SNAPSHOT");
-    output("| Railway: %-8s | Local: %-12s | Train: %-12s | Refresh: 1.0s       |\n",
-           central_peer_online(&view, CONTROLLER_TRAIN, now) ? "ACTIVE" : "STANDBY",
-           ui_connection(&view.peers[0], central_peer_online(&view, CONTROLLER_LOCAL, now)),
-           ui_connection(&view.peers[1], central_peer_online(&view, CONTROLLER_TRAIN, now)));
-    output("| Status age limit: %4.1fs  | Central process: OPERATIONAL                 |\n",
-           (double)central_monitor_status_max_age_ns(&view) / CENTRAL_NSEC);
-    output("+----------------------------------------------------------------------------+\n");
+    ui_rowf("Node: VM3  | Mode: %-6s | System: ONLINE | View: %-9s | Build: %s",
+            mode == CENTRAL_IPC_GLOBAL ? "GLOBAL" : "LOCAL",
+            watching ? "LIVE VIEW" : "SNAPSHOT", CENTRAL_BUILD_VERSION);
+    ui_rowf("Railway: %-8s | Local: %-12s | Train: %-12s | Refresh: 1.0s | Status limit: %.1fs",
+            train_online ? "ACTIVE" : "STANDBY",
+            ui_connection(&view.peers[0], local_online),
+            ui_connection(&view.peers[1], train_online),
+            (double)central_monitor_status_max_age_ns(&view) / CENTRAL_NSEC);
+    ui_rowf("Central process: OPERATIONAL | Qnet/GNS transport handled independently | Operator UI: READY");
 
     ui_panel("INTERSECTIONS  |  SIGNALS / SENSORS / RAILWAY PRE-EMPTION");
-    output("| ID | MODE     | PHASE        | NS       | EW       | PED NS/EW | RAIL     |\n");
-    output("|----+----------+--------------+----------+----------+-----------+----------|\n");
+    ui_rowf("ID | MODE     | PHASE        | NS     | EW     | PED NS/EW | RAIL  | HEALTH   | LINK");
+    ui_rowf("---+----------+--------------+--------+--------+-----------+-------+----------+-------------");
     for (i = 0; i < NUM_INTERSECTIONS; ++i) {
         const central_intersection_status_t *entry = &view.intersections[i];
         const status_msg_t *status = &entry->status;
         const char *freshness;
         const char *health = ui_health(&view, CONTROLLER_LOCAL, i);
         if (!entry->valid) {
-            output("| I%u | %-8s | %-12s | %-8s | %-8s | %-9s | %-8s |\n",
-                   i + 1, "WAITING", "NO REPORT", "--", "--", "--", "UNKNOWN");
+            ui_rowf("I%u | %-8s | %-12s | %-6s | %-6s | %-9s | %-5s | %-8s | %-11s",
+                    i + 1, "WAITING", "NO REPORT", "--", "--", "--/--", "--", "UNKNOWN", "NO DATA");
             continue;
         }
         freshness = !connected[routes[i]] || now < probes[routes[i]] ||
                     now - probes[routes[i]] >= HEARTBEAT_MISS_LIMIT * CENTRAL_NSEC ? "OFFLINE" :
                     !entry->synchronized ? "WAITING UPDATE" :
-                    now < entry->received_at || now - entry->received_at >= central_monitor_status_max_age_ns(&view) ? "STALE" : "CURRENT";
-        output("| I%u | %-8s | %-12s | %-8s | %-8s | %-4s/%-4s | %-8s |\n",
-               i + 1, mode_name(status->mode), phase_name(status->phase),
-               light_name(status->ns_state), light_name(status->ew_state),
-               status->pedestrian_ns ? "WALK" : "STOP",
-               status->pedestrian_ew ? "WALK" : "STOP",
-               status->railway_preempt ? "HOLD" : "CLEAR");
+                    now < entry->received_at ||
+                    now - entry->received_at >= central_monitor_status_max_age_ns(&view) ? "STALE" : "CURRENT";
+        ui_rowf("I%u | %-8s | %-12s | %-6s | %-6s | %-4s/%-4s | %-5s | %-8s | %-11s",
+                i + 1, mode_name(status->mode), phase_name(status->phase),
+                light_name(status->ns_state), light_name(status->ew_state),
+                status->pedestrian_ns ? "WALK" : "STOP",
+                status->pedestrian_ew ? "WALK" : "STOP",
+                status->railway_preempt ? "HOLD" : "CLEAR", health, freshness);
         if (status->telemetry_version) {
-            output("|    | Remain: %3us | Sensors NS/EW: %u/%u | PedReq: %u/%u | "
-                   "Sim: %s %02u:%02u | Train P/A/R: %u/%u/%us |\n",
-                   status->time_remaining,
-                   (unsigned)status->sensor_ns_count, (unsigned)status->sensor_ew_count,
-                   (unsigned)status->pedestrian_ns_request,
-                   (unsigned)status->pedestrian_ew_request,
-                   status->sim_running ? "RUN" : "STOP",
-                   (unsigned)status->sim_minute_of_day / 60,
-                   (unsigned)status->sim_minute_of_day % 60,
-                   (unsigned)status->train_pending,
-                   (unsigned)status->train_active,
-                   (unsigned)status->train_recovery_remaining);
-            output("|    | Health: %-8s | Link: %-13s | Age: %5.1fs | %-12s |\n",
-                   health, freshness, age_seconds(now, entry->received_at),
-                   status->fault_active ? fault_name(status->fault_type) : "CLEAR");
-            output("|    | Seq %u | Last cmd %u |                                           |\n",
-                   (unsigned)status->status_sequence,
-                   (unsigned)status->last_command_id);
+            ui_rowf("   Detail | Rem:%3us | Sensor NS/EW:%u/%u | PedReq:%u/%u | Sim:%s %02u:%02u | Age:%4.1fs",
+                    status->time_remaining,
+                    (unsigned)status->sensor_ns_count, (unsigned)status->sensor_ew_count,
+                    (unsigned)status->pedestrian_ns_request, (unsigned)status->pedestrian_ew_request,
+                    status->sim_running ? "RUN" : "STOP",
+                    (unsigned)status->sim_minute_of_day / 60,
+                    (unsigned)status->sim_minute_of_day % 60,
+                    age_seconds(now, entry->received_at));
+            ui_rowf("          Train P/A/R:%u/%u/%us | Seq:%u | Last cmd:%u | Fault:%s",
+                    (unsigned)status->train_pending, (unsigned)status->train_active,
+                    (unsigned)status->train_recovery_remaining,
+                    (unsigned)status->status_sequence, (unsigned)status->last_command_id,
+                    status->fault_active ? fault_name(status->fault_type) : "CLEAR");
         } else {
-            output("|    | Health: %-8s | Link: %-13s | Age: %5.1fs | Telemetry: BASIC |\n",
-                   health, freshness, age_seconds(now, entry->received_at));
+            ui_rowf("   Detail | Age:%4.1fs | Telemetry:BASIC | Health:%s | Link:%s",
+                    age_seconds(now, entry->received_at), health, freshness);
         }
     }
 
     ui_panel("RAILWAY / CROSSINGS  |  TRAIN CONTROL AND GATE SAFETY");
-    output("| ID | TRAIN STATE  | GATE     | FAULT          | HEALTH   | AGE   | LINK   |\n");
-    output("|----+--------------+----------+----------------+----------+-------+--------|\n");
+    ui_rowf("ID | TRAIN STATE  | GATE     | FAULT              | HEALTH   | AGE    | LINK");
+    ui_rowf("---+--------------+----------+--------------------+----------+--------+--------");
     for (i = 0; i < NUM_CROSSINGS; ++i) {
         static const char *trains[] = {"NONE", "APPROACHING", "AT CROSSING", "CLEAR"};
         static const char *gates[] = {"OPEN", "CLOSING", "CLOSED", "OPENING", "FAULT"};
         const central_crossing_status_t *entry = &view.crossings[i];
-        const char *link = central_peer_online(&view, CONTROLLER_TRAIN, now) ? "UP" : "DOWN";
+        const char *link = train_online ? "UP" : "DOWN";
         if (!entry->valid) {
-            output("| P%u | %-12s | %-8s | %-14s | %-8s | --    | %-6s |\n",
-                   i + 1, "WAITING", "--", "UNKNOWN", "UNKNOWN", link);
+            ui_rowf("P%u | %-12s | %-8s | %-18s | %-8s | %-6s | %-6s",
+                    i + 1, "WAITING", "--", "UNKNOWN", "UNKNOWN", "--", link);
             continue;
         }
-        output("| P%u | %-12s | %-8s | %-14s | %-8s | %5.1f | %-6s |\n",
-               i + 1, trains[entry->status.train_state], gates[entry->status.gate_state],
-               fault_name(entry->status.fault), ui_health(&view, CONTROLLER_TRAIN, i),
-               age_seconds(now, entry->received_at), link);
+        ui_rowf("P%u | %-12s | %-8s | %-18s | %-8s | %5.1fs | %-6s",
+                i + 1, trains[entry->status.train_state], gates[entry->status.gate_state],
+                fault_name(entry->status.fault), ui_health(&view, CONTROLLER_TRAIN, i),
+                age_seconds(now, entry->received_at), link);
     }
 
     ui_panel("CONNECTIONS  |  DISTRIBUTED SYSTEM HEALTH");
-    output("| ENDPOINT          | LINK          | CONTACT       | HEALTH             |\n");
-    output("|-------------------+---------------+---------------+--------------------|\n");
-    output("| LOCAL CONTROLLERS | %-13s | %-13s | %-18s |\n",
-           ui_connection(&view.peers[0], central_peer_online(&view, CONTROLLER_LOCAL, now)),
-           central_peer_online(&view, CONTROLLER_LOCAL, now) ? "HEARTBEAT OK" : "LOST",
-           ui_health(&view, CONTROLLER_LOCAL, 0));
-    output("| TRAIN CONTROLLER  | %-13s | %-13s | %-18s |\n",
-           ui_connection(&view.peers[1], central_peer_online(&view, CONTROLLER_TRAIN, now)),
-           central_peer_online(&view, CONTROLLER_TRAIN, now) ? "HEARTBEAT OK" : "LOST",
-           ui_health(&view, CONTROLLER_TRAIN, 0));
+    ui_rowf("ENDPOINT           | LINK          | CONTACT       | HEALTH");
+    ui_rowf("-------------------+---------------+---------------+--------------------");
+    ui_rowf("LOCAL CONTROLLERS  | %-13s | %-13s | %-18s",
+            ui_connection(&view.peers[0], local_online),
+            local_online ? "HEARTBEAT OK" : "LOST",
+            ui_health(&view, CONTROLLER_LOCAL, 0));
+    ui_rowf("TRAIN CONTROLLER   | %-13s | %-13s | %-18s",
+            ui_connection(&view.peers[1], train_online),
+            train_online ? "HEARTBEAT OK" : "LOST",
+            ui_health(&view, CONTROLLER_TRAIN, 0));
 
     ui_panel("RECENT EVENTS  |  ROLLING ACTIVITY FEED");
-    if (!count) output("| No events received yet.                                                     |\n");
-    for (i = 0; i < count; ++i) output("| %-74.74s |\n", events[(next + 8 - count + i) % 8]);
-    if (dropped) output("| Dropped log records: %-52u |\n", dropped);
-    if (log_failed) output("| EVENT LOG FAILED: new events are not being saved.                         |\n");
+    if (!count) ui_rowf("No events received yet.");
+    for (i = 0; i < count; ++i) ui_rowf("%s", events[(next + 8 - count + i) % 8]);
+    if (dropped) ui_rowf("Dropped log records: %u", dropped);
+    if (log_failed) ui_rowf("EVENT LOG FAILED: new events are not being saved.");
 
     ui_panel("CONTROLS  |  OPERATOR COMMANDS");
-    output("| status  live snapshot     watch  continuous refresh     help  full help    |\n");
-    output("| commands command history  faults active faults          events event feed  |\n");
-    output("| quit    close this display (Central keeps running)                        |\n");
+    ui_rowf("status  live snapshot  |  watch  continuous refresh  |  help  full help");
+    ui_rowf("commands command history | faults active faults | events event feed | quit close display");
+    ui_border();
+
+    dashboard_rendering = 0;
     if (!output_buffer && watching) output("Live view: press Enter to return to the command prompt.\n");
     if (!output_buffer) fflush(stdout);
 }
