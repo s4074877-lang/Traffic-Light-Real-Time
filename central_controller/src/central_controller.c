@@ -84,6 +84,7 @@ typedef struct {
 } peer_context_t;
 
 static central_state_t state;
+static central_ipc_mode_t display_mode = CENTRAL_IPC_LOCAL;
 static volatile sig_atomic_t interrupted;
 static atomic_int shutdown_requested;
 /* Only the operator thread reads/writes this flag. */
@@ -404,7 +405,7 @@ static void display_ui(void) {
 
     ui_panel("CENTRAL CONTROL ROOM  |  LIVE SUPERVISORY DASHBOARD");
     ui_rowf("Node: VM3  | Mode: %-6s | System: ONLINE | View: %-9s | Build: %s",
-            ui_ipc_mode == CENTRAL_IPC_GLOBAL ? "GLOBAL" : "LOCAL",
+            display_mode == CENTRAL_IPC_GLOBAL ? "GLOBAL" : "LOCAL",
             watching ? "LIVE VIEW" : "SNAPSHOT", CENTRAL_BUILD_VERSION);
     ui_rowf("Railway: %-8s | Local: %-12s | Train: %-12s | Refresh: 1.0s | Status limit: %.1fs",
             train_online ? "ACTIVE" : "STANDBY",
@@ -1259,7 +1260,6 @@ int main(int argc, char *argv[]) {
         }
         else { fprintf(stderr, "Unknown or incomplete option: %s\n", argv[i]); return EXIT_FAILURE; }
     }
-    ui_ipc_mode = mode;
     /* The Local launcher publishes one comm endpoint per intersection. */
     for (i = 1; i < NUM_INTERSECTIONS; ++i) {
         unsigned peer;
