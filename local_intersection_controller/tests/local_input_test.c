@@ -88,6 +88,71 @@ static void test_view_selection(void) {
     CHECK(selected == I1);
 }
 
+static void test_vehicle_countdown(void) {
+    status_msg_t s = {0};
+    s.phase = PHASE_EW_GREEN;
+    s.ns_state = LIGHT_RED;
+    s.ew_state = LIGHT_GREEN;
+    s.time_remaining = 14;
+    CHECK(local_vehicle_seconds(&s, DIR_NS) == 16);
+    CHECK(local_vehicle_seconds(&s, DIR_EW) == 14);
+    s.phase = PHASE_EW_YELLOW;
+    s.ew_state = LIGHT_YELLOW;
+    s.time_remaining = 2;
+    CHECK(local_vehicle_seconds(&s, DIR_NS) == 2);
+    CHECK(local_vehicle_seconds(&s, DIR_EW) == 2);
+    s.phase = PHASE_NS_GREEN;
+    s.ns_state = LIGHT_GREEN;
+    s.ew_state = LIGHT_RED;
+    s.time_remaining = 20;
+    CHECK(local_vehicle_seconds(&s, DIR_NS) == 20);
+    CHECK(local_vehicle_seconds(&s, DIR_EW) == 22);
+    s.coordination_pending = 1;
+    CHECK(local_vehicle_seconds(&s, DIR_EW) == -1);
+    CHECK(local_vehicle_seconds(&s, DIR_NS) == 20);
+    s.railway_preempt = 1;
+    CHECK(local_vehicle_seconds(&s, DIR_NS) == -1);
+    s.railway_preempt = 0;
+    s.mode = MODE_FAILSAFE;
+    CHECK(local_vehicle_seconds(&s, DIR_NS) == -1);
+}
+
+static void test_arrival_directions(void) {
+    unsigned seed;
+    int seen[3] = {0};
+    reset_demo_inputs_locked();
+    state.sim_running = 1;
+    state.manual_sensor_override = 0;
+    state.phase = PHASE_NS_GREEN;
+    state.train_pending = state.train_active = state.train_recovery_remaining = 0;
+    for (seed = 1; seed <= 100; ++seed) {
+        int expected;
+        srand(seed);
+        expected = rand() % 3;
+        srand(seed);
+        state.sensor_ns_count = state.sensor_ew_count = 0;
+        state.next_car_in_seconds = 1;
+        update_vehicle_counts_locked();
+        CHECK(state.sensor_ns_count == (expected == 0 || expected == 2));
+        CHECK(state.sensor_ew_count == (expected == 1 || expected == 2));
+        CHECK(state.next_car_in_seconds > 0);
+        seen[expected] = 1;
+    }
+    CHECK(seen[0] && seen[1] && seen[2]);
+    state.train_active = 1;
+    state.sensor_ns_count = state.sensor_ew_count = MAX_SENSOR_CARS;
+    state.next_car_in_seconds = 1;
+    update_vehicle_counts_locked();
+    CHECK(state.sensor_ns_count == MAX_SENSOR_CARS);
+    CHECK(state.sensor_ew_count == MAX_SENSOR_CARS);
+    state.manual_sensor_override = 1;
+    state.sensor_ns_count = state.sensor_ew_count = 0;
+    state.next_car_in_seconds = 1;
+    update_vehicle_counts_locked();
+    CHECK(state.sensor_ns_count == 0 && state.sensor_ew_count == 0);
+    reset_demo_inputs_locked();
+}
+
 int main(void) {
     local_state_init(CONN_MODE_LOCAL, I1, LOCAL_SERVICE_NAME);
     test_console_commands();
@@ -95,6 +160,8 @@ int main(void) {
     test_simulation_command_telemetry();
     test_sensor_bounds();
     test_view_selection();
+    test_vehicle_countdown();
+    test_arrival_directions();
     local_state_destroy();
     printf("LOCAL_INPUT_TEST %s checks=%u failures=%u\n",
            failures ? "FAIL" : "PASS", checks, failures);

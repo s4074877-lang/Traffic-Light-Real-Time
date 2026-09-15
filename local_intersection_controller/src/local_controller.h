@@ -64,8 +64,7 @@ typedef struct {
 
     int sensor_ns_count;
     int sensor_ew_count;
-    int next_ns_car_in_seconds;
-    int next_ew_car_in_seconds;
+    int next_car_in_seconds;
 
     int ped_ns_request;
     int ped_ew_request;
@@ -124,6 +123,7 @@ int railway_display_line(uint8_t id);
 void init_message(test_message_t *msg, msg_type_t type,
                   controller_type_t src, controller_type_t dst);
 void fill_status_locked(status_msg_t *status);
+int local_vehicle_seconds(const status_msg_t *status, direction_t direction);
 uint16_t prepare_status_message_locked(test_message_t *msg);
 uint16_t prepare_fault_message_locked(test_message_t *msg);
 uint16_t prepare_heartbeat_message_locked(test_message_t *msg);

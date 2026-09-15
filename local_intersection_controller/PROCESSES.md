@@ -21,9 +21,13 @@ when `-i` is supplied. Explicit roles without `-i` retain the legacy I1 name.
 The single-intersection screen keeps the original console layout: service and
 connections, received-message timestamps, timing, vehicle lights, pedestrians,
 sensors and train state. The all view uses six compact sections with the same
-headings, bracketed values and separator lines. Both display and interactive UI
-share `src/local_ui.c`. Only active WALK countdowns are shown; STOP and red
-lamp future durations are not predicted across adaptive timing changes.
+headings and separator lines, with one table row per intersection. Both display
+and interactive UI share `src/local_ui.c`. Vehicle green/yellow countdowns use
+the current phase timer; red includes the opposite green's remaining yellow.
+These are current-plan countdowns and may change after an input. Red countdowns
+are unavailable during pending coordination; railway/failsafe shows `--`.
+Only active WALK countdowns are shown for pedestrians. Initial-phase and baseline
+timing details are omitted from the terminal.
 The private core reply now includes UI metadata; restart all Local roles using
 the same rebuilt binary. The shared Central/Train wire protocol is unchanged.
 
