@@ -93,6 +93,30 @@ static const char *inline_key_color(const char *cursor, size_t *length) {
     return cursor[1] == '0' ? UI_RED : UI_YELLOW;
 }
 
+static int lamp_label_triplet(const char *cursor) {
+    if (!cursor) return 0;
+    return (cursor[0] == 'R' || cursor[0] == 'r') &&
+           cursor[1] == ' ' && cursor[2] == ' ' &&
+           (cursor[3] == 'Y' || cursor[3] == 'y') &&
+           cursor[4] == ' ' && cursor[5] == ' ' &&
+           (cursor[6] == 'G' || cursor[6] == 'g');
+}
+
+static void render_lamp_label_triplet(const char *cursor, int color) {
+    static const char visible[] = {'R', 'Y', 'G'};
+    static const char *active_colors[] = {UI_RED, UI_YELLOW, UI_GREEN};
+    const int active[3] = {
+        cursor[0] == 'R', cursor[3] == 'Y', cursor[6] == 'G'
+    };
+    unsigned i;
+    for (i = 0; i < 3; ++i) {
+        if (color) fputs(active[i] ? active_colors[i] : UI_DIM_WHITE, stdout);
+        putchar(visible[i]);
+        if (color) fputs(UI_RESET, stdout);
+        if (i != 2) fputs("  ", stdout);
+    }
+}
+
 static void render_line(const char *line, int color) {
     const char *cursor = line;
     unsigned lamp_slot = 0;
@@ -106,27 +130,36 @@ static void render_line(const char *line, int color) {
         size_t length = 0;
         const char *prefix = NULL;
 
-        /* Fixed-width traffic bulbs from the live map.  {O} is active and {o}
-           inactive. The bulb's position in each R/Y/G triplet selects color;
-           ANSI bytes never participate in layout width. */
-        if ((!strncmp(cursor, "{O}", 3) || !strncmp(cursor, "{o}", 3)) && color) {
+        /* INTERNAL {O}/{o} markers are always displayed as the same lowercase
+           {o} shape.  State is communicated by color/brightness only, so the
+           terminal box width never changes when a lamp changes phase. */
+        if (!strncmp(cursor, "{O}", 3) || !strncmp(cursor, "{o}", 3)) {
             static const char *active_colors[] = {UI_RED, UI_YELLOW, UI_GREEN};
             const int active = cursor[1] == 'O';
-            fputs(active ? active_colors[lamp_slot % 3] : UI_DIM_WHITE, stdout);
-            fwrite(cursor, 1, 3, stdout);
-            fputs(UI_RESET, stdout);
+            if (color) fputs(active ? active_colors[lamp_slot % 3] : UI_DIM_WHITE, stdout);
+            fputs("{o}", stdout);
+            if (color) fputs(UI_RESET, stdout);
             cursor += 3;
             ++lamp_slot;
             continue;
         }
-        if (!strncmp(cursor, "{?}", 3) && color) {
-            fputs(UI_YELLOW, stdout);
+        if (!strncmp(cursor, "{?}", 3)) {
+            if (color) fputs(UI_YELLOW, stdout);
             fwrite(cursor, 1, 3, stdout);
-            fputs(UI_RESET, stdout);
+            if (color) fputs(UI_RESET, stdout);
             cursor += 3;
             ++lamp_slot;
             continue;
         }
+
+        /* Controller uses uppercase only as an active marker in R/Y/G label
+           rows.  Render all labels uppercase; color only the active one. */
+        if (lamp_label_triplet(cursor)) {
+            render_lamp_label_triplet(cursor, color);
+            cursor += 7;
+            continue;
+        }
+
         if (color && (!strncmp(cursor, "[>>>]", 5) || !strncmp(cursor, "[<<<]", 5))) {
             fputs(UI_MAGENTA, stdout);
             fwrite(cursor, 1, 5, stdout);
@@ -271,7 +304,7 @@ static void print_quick_menu(int color) {
     print_menu_border(color);
 
     print_menu_text("RAILWAY / TRAIN", color);
-    print_menu_text("[TU] Train UP   [TD] Train DOWN   [TB] Both UP+DOWN   [TS] Train Status", color);
+    print_menu_text("[TU] Train UP       [TD] Train DOWN       [TS] Train Status", color);
     print_menu_border(color);
 
     print_menu_text("DISPLAY / HELP", color);
@@ -310,7 +343,6 @@ static int translate_shortcut(const char *input, char *output, size_t size,
     if (!strcmp(key, "XA")) { snprintf(output, size, "sim-stop all"); return 1; }
     if (!strcmp(key, "TU")) { snprintf(output, size, "train-cmd train-up"); return 1; }
     if (!strcmp(key, "TD")) { snprintf(output, size, "train-cmd train-down"); return 1; }
-    if (!strcmp(key, "TB")) { snprintf(output, size, "train-cmd train-both"); return 1; }
     if (!strcmp(key, "TS")) { snprintf(output, size, "train-cmd status"); return 1; }
 
     if (length == 2 && key[1] >= '1' && key[1] <= '6') {
@@ -327,7 +359,7 @@ static int translate_shortcut(const char *input, char *output, size_t size,
 static void usage(const char *program) {
     printf("Usage: %s [-n local-service] [--no-color] [-c command]\n"
            "Separate Central display, build %s (%s %s).\n"
-           "L opens the live map; D opens live detailed status; both refresh once per second.\n"
+           "L opens the live map (0.5 s refresh); D opens live detailed status (1.0 s).\n"
            "status, help, commands, faults and events inspect the core.\n"
            "Other commands are forwarded once. quit closes only this UI.\n"
            "shutdown requests that the core stop.\n", program, CENTRAL_BUILD_VERSION, __DATE__, __TIME__);
@@ -336,7 +368,9 @@ static void usage(const char *program) {
 int main(int argc, char **argv) {
     const char *name = CENTRAL_UI_SERVICE;
     const char *once = NULL;
-    int color = isatty(STDOUT_FILENO) && getenv("NO_COLOR") == NULL;
+    /* Force ANSI color for the interactive demo even when SSH/plink does not
+       report stdout as a TTY. --no-color still provides an explicit opt-out. */
+    int color = 1;
     int watching = 0, overflow = 0; /* 0 none, 1 map, 2 detailed */
     size_t used = 0;
     char line[CENTRAL_UI_REQUEST_SIZE];
@@ -379,7 +413,7 @@ int main(int argc, char **argv) {
             printf("Live view: commands stay in this view; blank Enter pauses refresh.\n");
             fflush(stdout);
             map_frame_drawn = watching == 1;
-            next_refresh = monotonic_ns() + 1000000000ULL;
+            next_refresh = monotonic_ns() + (watching == 1 ? 500000000ULL : 1000000000ULL);
         }
         ready = poll(&input, 1, 100);
         if (ready < 0) { if (errno == EINTR) continue; perror("poll"); return EXIT_FAILURE; }

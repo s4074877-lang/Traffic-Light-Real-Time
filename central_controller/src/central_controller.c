@@ -88,6 +88,18 @@ static central_ipc_mode_t display_mode = CENTRAL_IPC_LOCAL;
 /* Presentation-only schematic direction. Updated when Central sends train-up/down.
    It never affects railway safety or shared protocol behaviour. */
 static int display_train_direction = 1; /* +1 => >>>, -1 => <<< */
+
+/* Presentation-only train animation.  The real Railway Controller still owns
+   train/crossing state.  This state only interpolates an ASCII sprite between
+   live railway updates so the operator map is easier to read. */
+typedef struct {
+    int latched;
+    int active;
+    int direction;
+    uint64_t started_ns;
+} map_train_animation_t;
+
+static map_train_animation_t map_train_animation;
 static volatile sig_atomic_t interrupted;
 static atomic_int shutdown_requested;
 /* Only the operator thread reads/writes this flag. */
@@ -166,8 +178,33 @@ static const char *ui_keyword_color(const char *start, const char *cursor, size_
     return NULL;
 }
 
+static int ui_lamp_label_triplet(const char *cursor) {
+    if (!cursor) return 0;
+    return (cursor[0] == 'R' || cursor[0] == 'r') &&
+           cursor[1] == ' ' && cursor[2] == ' ' &&
+           (cursor[3] == 'Y' || cursor[3] == 'y') &&
+           cursor[4] == ' ' && cursor[5] == ' ' &&
+           (cursor[6] == 'G' || cursor[6] == 'g');
+}
+
+static void ui_console_render_label_triplet(const char *cursor) {
+    static const char visible[] = {'R', 'Y', 'G'};
+    static const char *colors[] = {UI_RED, UI_YELLOW, UI_GREEN};
+    const int active[3] = {
+        cursor[0] == 'R', cursor[3] == 'Y', cursor[6] == 'G'
+    };
+    unsigned i;
+    for (i = 0; i < 3; ++i) {
+        fputs(active[i] ? colors[i] : UI_DIM "\033[37m", stdout);
+        putchar(visible[i]);
+        fputs(UI_RESET, stdout);
+        if (i != 2) fputs("  ", stdout);
+    }
+}
+
 static void ui_console_write(const char *text) {
     const char *line = text, *cursor = text;
+    unsigned lamp_slot = 0;
     while (*cursor) {
         if (cursor == line && (*cursor == '+' ||
             (cursor[0] == '|' && cursor[1] == '-' && cursor[2] == '-'))) {
@@ -184,8 +221,34 @@ static void ui_console_write(const char *text) {
             putchar('\n');
             ++cursor;
             line = cursor;
+            lamp_slot = 0;
             continue;
         }
+
+        if (!strncmp(cursor, "{O}", 3) || !strncmp(cursor, "{o}", 3)) {
+            static const char *colors[] = {UI_RED, UI_YELLOW, UI_GREEN};
+            const int active = cursor[1] == 'O';
+            fputs(active ? colors[lamp_slot % 3] : UI_DIM "\033[37m", stdout);
+            fputs("{o}", stdout);
+            fputs(UI_RESET, stdout);
+            cursor += 3;
+            ++lamp_slot;
+            continue;
+        }
+        if (!strncmp(cursor, "{?}", 3)) {
+            fputs(UI_YELLOW, stdout);
+            fwrite(cursor, 1, 3, stdout);
+            fputs(UI_RESET, stdout);
+            cursor += 3;
+            ++lamp_slot;
+            continue;
+        }
+        if (ui_lamp_label_triplet(cursor)) {
+            ui_console_render_label_triplet(cursor);
+            cursor += 7;
+            continue;
+        }
+
         size_t length = 0;
         const char *color = ui_keyword_color(line, cursor, &length);
         if (color && length) {
@@ -359,8 +422,7 @@ static void print_help(void) {
            "  sim-time <I1..I6|all> <HH:MM>\n"
            "  coordinate <I1..I6|all> <NS|EW> <offset 0..63>\n"
            "  coordinate-at <delay 1..3600s> <I1..I6|all> <NS|EW> <offset 0..63>\n"
-           "  train-cmd <train-up|train-down|train-both|train P# up/down|noexit P# up/down>\n"
-           "  train-up | train-down | train-both | train P# up/down  (train-cmd prefix optional)\n"
+           "  train-cmd <train-up|train-down|train P# up/down|noexit P# up/down>\n"
            "  train-cmd <stuck P#|reset P#|test [1..9]|scale 1..100|status>\n"
            "  schedule | schedule-resume <I1..I6|all> | version\n"
            "  map | status | commands | faults | events | help | quit\n"
@@ -383,16 +445,30 @@ static void map_lamps(char *buffer, size_t size, unsigned state) {
         snprintf(buffer, size, "{?}{?}{?}");
         return;
     }
+    /* Uppercase O is only an INTERNAL active marker. central_ui always renders
+       every bulb visually as lowercase {o}; only ANSI color/brightness changes. */
     snprintf(buffer, size, "{%c}{%c}{%c}",
              state == LIGHT_RED ? 'O' : 'o',
              state == LIGHT_YELLOW ? 'O' : 'o',
              state == LIGHT_GREEN ? 'O' : 'o');
 }
 
+static void map_lamp_labels(char *buffer, size_t size, unsigned state) {
+    if (!buffer || !size) return;
+    if (state > LIGHT_GREEN) {
+        snprintf(buffer, size, "?  ?  ?");
+        return;
+    }
+    /* Uppercase marks the active label; lowercase marks inactive labels.
+       central_ui renders all three visibly as R/Y/G and colors only the active one. */
+    snprintf(buffer, size, "%c  %c  %c",
+             state == LIGHT_RED ? 'R' : 'r',
+             state == LIGHT_YELLOW ? 'Y' : 'y',
+             state == LIGHT_GREEN ? 'G' : 'g');
+}
+
 static const char *map_ped_state(unsigned walk, unsigned request) {
-    /* Fixed-width six-character tokens keep every live-map card aligned.
-       WALK is the actual Local pedestrian output; REQ is a latched request
-       waiting for a safe compatible phase; STOP is the normal don't-walk state. */
+    /* Fixed-width six-character tokens keep every live-map card aligned. */
     if (walk) return "[WALK]";
     if (request) return "[REQ ]";
     return "[STOP]";
@@ -408,39 +484,75 @@ static const char *map_gate_state(unsigned state_value) {
     return state_value <= GATE_FAULT ? names[state_value] : "UNKNOWN";
 }
 
-static void map_train_canvas(char *buffer, size_t size,
-                             const central_monitor_t *view) {
-    enum { WIDTH = 76, SPRITE = 14 };
-    /* Rail canvas aligns exactly under the three card connector columns. */
-    static const int crossing_center[NUM_CROSSINGS] = {10, 37, 64};
-    static const char right_sprite[] = "{[>>>][>>>]}\\\\";
-    static const char left_sprite[]  = "//{[<<<][<<<]}";
-    int active = -1, at_crossing = 0, start, i;
-    const char *sprite;
-
-    if (!buffer || size < WIDTH + 1 || !view) return;
-    memset(buffer, '.', WIDTH);
-    buffer[WIDTH] = '\0';
-
+static int map_train_event_active(const central_monitor_t *view) {
+    unsigned i;
+    if (!view) return 0;
     for (i = 0; i < NUM_CROSSINGS; ++i) {
         if (!view->crossings[i].valid) continue;
-        if (view->crossings[i].status.train_state == TRAIN_AT_CROSSING) {
-            active = i;
-            at_crossing = 1;
-            break;
-        }
-        if (active < 0 && view->crossings[i].status.train_state == TRAIN_APPROACHING)
-            active = i;
+        if (view->crossings[i].status.train_state == TRAIN_APPROACHING ||
+            view->crossings[i].status.train_state == TRAIN_AT_CROSSING)
+            return 1;
     }
-    if (active < 0) return;
+    return 0;
+}
 
-    sprite = display_train_direction >= 0 ? right_sprite : left_sprite;
-    if (at_crossing) start = crossing_center[active] - SPRITE / 2;
-    else if (display_train_direction >= 0) start = crossing_center[active] - SPRITE - 3;
-    else start = crossing_center[active] + 3;
-    if (start < 0) start = 0;
-    if (start + SPRITE > WIDTH) start = WIDTH - SPRITE;
-    memcpy(buffer + start, sprite, SPRITE);
+static void map_train_tracks(char *up_track, char *down_track, size_t size,
+                             const central_monitor_t *view, uint64_t now) {
+    enum { WIDTH = 76 };
+    static const char right_sprite[] = "[>>>][>>>]";
+    static const char left_sprite[]  = "[<<<][<<<]";
+    const uint64_t animation_ns = 12000000000ULL; /* 12 s presentation transit */
+    const size_t sprite_width = sizeof(right_sprite) - 1;
+    uint64_t elapsed;
+    size_t max_start, start;
+    char *track;
+    const char *sprite;
+    int railway_active;
+
+    if (!up_track || !down_track || size < WIDTH + 1 || !view) return;
+    memset(up_track, '.', WIDTH);
+    memset(down_track, '.', WIDTH);
+    up_track[WIDTH] = '\0';
+    down_track[WIDTH] = '\0';
+
+    railway_active = map_train_event_active(view);
+
+    /* A new Railway APPROACHING/AT_CROSSING episode starts one visual transit.
+       We latch it so a stale APPROACHING message cannot restart the animation
+       every refresh.  A later NONE/CLEAR episode rearms the next train. */
+    if (!railway_active) {
+        map_train_animation.latched = 0;
+        map_train_animation.active = 0;
+        return;
+    }
+
+    if (!map_train_animation.latched) {
+        map_train_animation.latched = 1;
+        map_train_animation.active = 1;
+        map_train_animation.direction = display_train_direction >= 0 ? 1 : -1;
+        map_train_animation.started_ns = now;
+    }
+
+    if (!map_train_animation.active) return;
+    elapsed = now >= map_train_animation.started_ns ? now - map_train_animation.started_ns : 0;
+    if (elapsed >= animation_ns) {
+        map_train_animation.active = 0;
+        return;
+    }
+
+    max_start = WIDTH - sprite_width;
+    start = (size_t)((elapsed * (uint64_t)max_start) / animation_ns);
+    if (start > max_start) start = max_start;
+
+    if (map_train_animation.direction >= 0) {
+        track = up_track;
+        sprite = right_sprite;
+    } else {
+        track = down_track;
+        sprite = left_sprite;
+        start = max_start - start;
+    }
+    memcpy(track + start, sprite, sprite_width);
 }
 
 static void display_map(void) {
@@ -448,8 +560,9 @@ static void display_map(void) {
     uint64_t now;
     int local_online, train_online;
     char ns[NUM_INTERSECTIONS][16], ew[NUM_INTERSECTIONS][16];
+    char ns_label[NUM_INTERSECTIONS][8], ew_label[NUM_INTERSECTIONS][8];
     const char *ped_ns[NUM_INTERSECTIONS], *ped_ew[NUM_INTERSECTIONS];
-    char train_canvas[77];
+    char train_up[77], train_down[77];
     unsigned i;
 
     pthread_mutex_lock(&state.mutex);
@@ -464,45 +577,50 @@ static void display_map(void) {
         if (!view.intersections[i].valid) {
             snprintf(ns[i], sizeof(ns[i]), "{?}{?}{?}");
             snprintf(ew[i], sizeof(ew[i]), "{?}{?}{?}");
+            snprintf(ns_label[i], sizeof(ns_label[i]), "?  ?  ?");
+            snprintf(ew_label[i], sizeof(ew_label[i]), "?  ?  ?");
             ped_ns[i] = "[----]";
             ped_ew[i] = "[----]";
         } else {
             const status_msg_t *status = &view.intersections[i].status;
             map_lamps(ns[i], sizeof(ns[i]), status->ns_state);
             map_lamps(ew[i], sizeof(ew[i]), status->ew_state);
+            map_lamp_labels(ns_label[i], sizeof(ns_label[i]), status->ns_state);
+            map_lamp_labels(ew_label[i], sizeof(ew_label[i]), status->ew_state);
             ped_ns[i] = map_ped_state((unsigned)status->pedestrian_ns,
                                       (unsigned)status->pedestrian_ns_request);
             ped_ew[i] = map_ped_state((unsigned)status->pedestrian_ew,
                                       (unsigned)status->pedestrian_ew_request);
         }
     }
-    map_train_canvas(train_canvas, sizeof(train_canvas), &view);
+    map_train_tracks(train_up, train_down, sizeof(train_up), &view, now);
 
     dashboard_rendering = 1;
     ui_panel("LIVE TRAFFIC MAP  |  SCHEMATIC VIEW - I1..I6 / P1..P3");
-    ui_rowf("Fixed-width lamps/ped signals: active color only | [WALK]/[STOP]/[REQ ] from Local telemetry | railway horizontal");
+    ui_rowf("Lamp shape stays {o}; active bulb + R/Y/G label use color only | two-way railway animation is UI-only");
     ui_rowf("");
     ui_rowf("%24s%27s%27s", "I1", "I3", "I5");
     ui_rowf("            +--------------------+     +--------------------+     +--------------------+");
     ui_rowf("            | N-S %-9s      |     | N-S %-9s      |     | N-S %-9s      |", ns[0], ns[2], ns[4]);
-    ui_rowf("            |      R  Y  G       |     |      R  Y  G       |     |      R  Y  G       |");
+    ui_rowf("            |      %-7s       |     |      %-7s       |     |      %-7s       |", ns_label[0], ns_label[2], ns_label[4]);
     ui_rowf("            |                    |     |                    |     |                    |");
     ui_rowf("            | E-W %-9s      |     | E-W %-9s      |     | E-W %-9s      |", ew[0], ew[2], ew[4]);
-    ui_rowf("            |      R  Y  G       |     |      R  Y  G       |     |      R  Y  G       |");
+    ui_rowf("            |      %-7s       |     |      %-7s       |     |      %-7s       |", ew_label[0], ew_label[2], ew_label[4]);
     ui_rowf("            | PED N-S %-6s     |     | PED N-S %-6s     |     | PED N-S %-6s     |", ped_ns[0], ped_ns[2], ped_ns[4]);
     ui_rowf("            | PED E-W %-6s     |     | PED E-W %-6s     |     | PED E-W %-6s     |", ped_ew[0], ped_ew[2], ped_ew[4]);
     ui_rowf("            +---------+----------+     +---------+----------+     +---------+----------+");
     ui_rowf("                      |                          |                          |");
     ui_rowf("            =========P1=========================P2=========================P3===========");
-    ui_rowf("            %s", train_canvas);
+    ui_rowf("            UP >>> %s", train_up);
+    ui_rowf("            DN <<< %s", train_down);
     ui_rowf("            ============================================================================");
     ui_rowf("                      |                          |                          |");
     ui_rowf("            +---------+----------+     +---------+----------+     +---------+----------+");
     ui_rowf("            | N-S %-9s      |     | N-S %-9s      |     | N-S %-9s      |", ns[1], ns[3], ns[5]);
-    ui_rowf("            |      R  Y  G       |     |      R  Y  G       |     |      R  Y  G       |");
+    ui_rowf("            |      %-7s       |     |      %-7s       |     |      %-7s       |", ns_label[1], ns_label[3], ns_label[5]);
     ui_rowf("            |                    |     |                    |     |                    |");
     ui_rowf("            | E-W %-9s      |     | E-W %-9s      |     | E-W %-9s      |", ew[1], ew[3], ew[5]);
-    ui_rowf("            |      R  Y  G       |     |      R  Y  G       |     |      R  Y  G       |");
+    ui_rowf("            |      %-7s       |     |      %-7s       |     |      %-7s       |", ew_label[1], ew_label[3], ew_label[5]);
     ui_rowf("            | PED N-S %-6s     |     | PED N-S %-6s     |     | PED N-S %-6s     |", ped_ns[1], ped_ns[3], ped_ns[5]);
     ui_rowf("            | PED E-W %-6s     |     | PED E-W %-6s     |     | PED E-W %-6s     |", ped_ew[1], ped_ew[3], ped_ew[5]);
     ui_rowf("            +--------------------+     +--------------------+     +--------------------+");
@@ -660,7 +778,7 @@ static void display_ui(void) {
     ui_panel("CONTROLS  |  QUICK KEYS");
     ui_rowf("[L] LIVE MAP   [D] LIVE DETAILS   [S] STATUS   [E] EVENTS   [F] FAULTS   [C] HISTORY");
     ui_rowf("[M] MENU       [H] FULL HELP                             [0] QUIT DISPLAY");
-    ui_rowf("Live map/details refresh every 1.0s; mutating commands remain Central supervisory requests.");
+    ui_rowf("Live map refresh 0.5s; details refresh 1.0s; commands remain Central supervisory requests.");
     ui_border();
 
     dashboard_rendering = 0;
@@ -1276,12 +1394,9 @@ static void execute_command(char *line) {
             output("Central schedule resumed; requests wait for fresh Local status. Local owns safe transitions.\n");
         }
     }
-    else if (!strncmp(line, "train-cmd ", 10) || !strncmp(line, "train", 5)) {
-        /* Bare train-up, train-down, train-both and train P# up|down are
-           accepted as if prefixed with train-cmd. */
-        const char *train_line = !strncmp(line, "train-cmd ", 10) ? line + 10 : line;
+    else if (!strncmp(line, "train-cmd ", 10)) {
         char payload[CENTRAL_TRAIN_PAYLOAD_SIZE];
-        if (!central_parse_train_command(train_line, payload)) { command_result = -1; output("Invalid Train simulation command. Type help.\n"); }
+        if (!central_parse_train_command(line + 10, payload)) { command_result = -1; output("Invalid Train simulation command. Type help.\n"); }
         else if (payload[0] == 'p' && strstr(payload, "-fault")) {
             command_result = -1;
             output("Not sent: current Train remote p#-fault handler can deadlock on its mutex.\n"
