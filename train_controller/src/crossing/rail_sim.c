@@ -25,7 +25,6 @@ typedef struct
 // ============================================
 typedef struct
 {
-    bool stuck;               // Gate is stuck (won't complete movement)
     int64_t move_complete_ms; // When current movement completes
 } sim_gate_t;
 
@@ -196,7 +195,6 @@ void rail_sim_init(crossing_t *crossings, int num_crossings, int time_scale)
 
     for (int i = 0; i < 3; i++)
     {
-        sim.gates[i].stuck = false;
         sim.gates[i].move_complete_ms = -1;
     }
 
@@ -234,8 +232,7 @@ static int tick_locked(void)
     for (int i = 0; i < sim.num_crossings && i < 3; i++)
     {
         if (sim.gates[i].move_complete_ms >= 0 &&
-            sim.sim_time_ms >= sim.gates[i].move_complete_ms &&
-            !sim.gates[i].stuck)
+            sim.sim_time_ms >= sim.gates[i].move_complete_ms)
         {
 
             crossing_t *cx = &sim.crossings[i];
@@ -297,8 +294,7 @@ void rail_sim_gate_command(crossing_t *cx, gate_command_t cmd)
     (void)cmd;
     lock_sim();
 
-    // A stuck gate won't complete its movement
-    if (sim.initialized && cx->id >= 1 && cx->id <= 3 && !sim.gates[cx->id - 1].stuck)
+    if (sim.initialized && cx->id >= 1 && cx->id <= 3)
     {
         // Schedule gate movement completion
         sim.gates[cx->id - 1].move_complete_ms = sim.sim_time_ms + sec_to_sim_ms(GATE_MOVE_SEC);
@@ -613,20 +609,6 @@ static bool command_locked(const char *cmd, char *reply, size_t reply_len)
         }
     }
 
-    // ===== stuck P#: gate gets stuck =====
-    if (strncmp(cmd, "stuck ", 6) == 0)
-    {
-        int id = parse_crossing_id(cmd + 6);
-        if (id >= 1 && id <= 3)
-        {
-            sim.gates[id - 1].stuck = true;
-            snprintf(reply, reply_len, "OK: Gate %d stuck", id);
-            return true;
-        }
-        snprintf(reply, reply_len, "ERROR: Invalid crossing");
-        return false;
-    }
-
     // ===== p#-fault: inject fault =====
     if ((cmd[0] == 'p' || cmd[0] == 'P') &&
         cmd[1] >= '1' && cmd[1] <= '3' &&
@@ -660,13 +642,12 @@ static bool command_locked(const char *cmd, char *reply, size_t reply_len)
         return false;
     }
 
-    // ===== reset P#: reset fault and unstick gate =====
+    // ===== reset P#: reset fault =====
     if (strncmp(cmd, "reset ", 6) == 0)
     {
         int id = parse_crossing_id(cmd + 6);
         if (id >= 1 && id <= 3)
         {
-            sim.gates[id - 1].stuck = false;
             crossing_t *cx = find_crossing(id);
             if (cx)
             {
@@ -721,9 +702,8 @@ static bool command_locked(const char *cmd, char *reply, size_t reply_len)
                  "                   (UP and DOWN trains can run at the same time)\n"
                  "  train P# dir   - Single train at crossing (dir=up/down)\n"
                  "  noexit P# dir  - Train that never exits\n"
-                 "  stuck P#       - Make gate stuck\n"
                  "  p#-fault       - Inject fault (e.g., p1-fault)\n"
-                 "  reset P#       - Reset fault and unstick gate\n"
+                 "  reset P#       - Reset fault\n"
                  "  scale N        - Set time scale (1-100)\n"
                  "  status         - Show simulator status\n"
                  "  help           - Show this help");

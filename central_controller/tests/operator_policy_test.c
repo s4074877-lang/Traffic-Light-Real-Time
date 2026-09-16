@@ -66,7 +66,6 @@ static void test_train_parser(void) {
     train_accept("train-both", "train-both");
     train_accept(" \ttrain p1 UP  ", "train P1 up");
     train_accept("noexit P3 DOWN", "noexit P3 down");
-    train_accept("stuck p2", "stuck P2");
     train_accept("reset P3", "reset P3");
     train_accept("P1-fault", "p1-fault");
     train_accept("p3-fault", "p3-fault");
@@ -87,7 +86,7 @@ static void test_train_parser(void) {
     const char *invalid[] = {
         "", " \t", "train", "train-up extra", "train-down extra", "train P0 up",
         "train P4 up", "train 1 up", "train P01 up", "train P1 sideways", "train P1",
-        "train P1 up extra", "noexit P1 upside", "stuck P0", "stuck P4", "stuck P1 x",
+        "train P1 up extra", "noexit P1 upside", "stuck P1", "stuck p2", "stuck P4",
         "reset P1;train-up", "reset P1 extra", "p0-fault", "p4-fault", "p1-fault extra",
         "fault P1", "test", "test 1", "test 9",
         "scale 0", "scale 101", "scale -1", "scale 1.0", "scale 100 extra",

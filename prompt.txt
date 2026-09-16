@@ -1,6 +1,0 @@
-/tmp/local_intersection_controller -g -i I1 -n traffic_local_controller
-/tmp/local_intersection_controller -g -i I2      # publishes traffic_local_I2
-/tmp/local_intersection_controller -g -i I3      # publishes traffic_local_I3
-/tmp/local_intersection_controller -g -i I4
-/tmp/local_intersection_controller -g -i I5
-/tmp/local_intersection_controller -g -i I6

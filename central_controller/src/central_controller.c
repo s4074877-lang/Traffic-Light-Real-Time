@@ -425,7 +425,7 @@ static void print_help(void) {
            "  coordinate <I1..I6|all> <NS|EW> <offset 0..63>\n"
            "  coordinate-at <delay 1..3600s> <I1..I6|all> <NS|EW> <offset 0..63>\n"
            "  train-cmd <train-up|train-down|train P# up/down|noexit P# up/down>\n"
-           "  train-cmd <stuck P#|reset P#|test [1..9]|scale 1..100|status>\n"
+           "  train-cmd <reset P#|scale 1..100|status>\n"
            "  schedule | schedule-resume <I1..I6|all> | version\n"
            "  map | status | commands | faults | events | help | quit\n"
            "  watch  (legacy live detailed status)\n"
@@ -1398,7 +1398,7 @@ static void execute_command(char *line) {
         else if (payload[0] == 'p' && strstr(payload, "-fault")) {
             command_result = -1;
             output("Not sent: current Train remote p#-fault handler can deadlock on its mutex.\n"
-                   "Use the Train console for direct fault injection, or stuck P# then train P# up.\n");
+                   "Use the Train console for direct fault injection, or noexit P# up for a train timeout.\n");
         } else {
             central_message_init(&message, MSG_TEST, CONTROLLER_CENTRAL, CONTROLLER_TRAIN);
             memcpy(message.data, payload, sizeof(payload));

@@ -94,10 +94,9 @@ int central_parse_train_command(const char *line,
                parse_direction(tokens[2], &direction)) {
         snprintf(canonical, sizeof(canonical), "%s P%u %s", tokens[0], crossing,
                  direction);
-    } else if (count == 2 &&
-               (strcmp(tokens[0], "stuck") == 0 || strcmp(tokens[0], "reset") == 0) &&
+    } else if (count == 2 && strcmp(tokens[0], "reset") == 0 &&
                parse_crossing(tokens[1], &crossing)) {
-        snprintf(canonical, sizeof(canonical), "%s P%u", tokens[0], crossing);
+        snprintf(canonical, sizeof(canonical), "reset P%u", crossing);
     } else if (count == 2 && strcmp(tokens[0], "scale") == 0 &&
                parse_unsigned(tokens[1], 1, 100, &value)) {
         snprintf(canonical, sizeof(canonical), "scale %u", value);

@@ -258,7 +258,7 @@ console instead.
 | `sim-start I1`, `sim-stop I1`, `sim-time I1 07:00` | Local traffic simulation and simulated clock |
 | `train-cmd train-up` / `train-down` / `train-both` | Run a train along the whole line |
 | `train-cmd train P1 up`, `train-cmd noexit P2 down` | One-crossing train / train that never leaves |
-| `train-cmd stuck P3`, `train-cmd reset P3` | Stick a gate / reset a crossing fault |
+| `train-cmd reset P3` | Reset a crossing fault |
 | `train-cmd scale 5`, `train-cmd status` | Simulator time scale 1–100 / simulator status |
 | `status`, `commands`, `faults`, `events` | Reports, command outcomes, fault log, events |
 | `schedule`, `schedule-resume I1`, `version`, `help` | Schedule, release operator hold, build, help |
@@ -305,7 +305,7 @@ flashing lights, fault and the last PREEMPT/CLEAR times. Commands on the command
 | `train-up` / `train-down` / `train-both` | Train along the line (UP P3→P2→P1, DOWN P1→P2→P3) |
 | `train P1 up` | Train at one crossing (`up` or `down`) |
 | `noexit P2 down` | Train that never leaves (raises a train timeout fault) |
-| `stuck P3` / `p1-fault` / `reset P1` | Stuck gate / inject fault / reset fault and unstick |
+| `p1-fault` / `reset P1` | Inject a fault / reset a fault |
 | `scale N` | Simulation speed 1–100 (default ×10) |
 | `status` / `help` | Simulator status and track layout / all commands |
 | `send-central` / `send-local` | Connection test messages |
@@ -423,7 +423,7 @@ and [local_intersection_controller/VALIDATION.md](local_intersection_controller/
 - `ACCEPTED` confirms receipt only. The Train controller replies success even when its
   simulator refuses a command (for example `BUSY`).
 - Central refuses to send `p#-fault` remotely; inject faults from the Train console, or
-  use `train-cmd stuck P#` followed by a train.
+  use `train-cmd noexit P# up` for a train-timeout fault.
 - Train commands from Central need the `train-cmd` prefix (or the `TU`/`TD`/`TB` keys).
 - The Train controller must be rebuilt together with Central: an older Central rejects
   the current railway status message. An older Train still works with the current

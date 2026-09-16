@@ -79,7 +79,6 @@ is `/tmp/central_controller.log`; select a writable persistent path when needed.
 | `train-cmd train-both` | Start the UP and DOWN trains at the same time |
 | `train-cmd train P1 up` | Simulate one crossing/direction; `down` also supported |
 | `train-cmd noexit P1 up` | Simulate missing train exit |
-| `train-cmd stuck P1` | Simulate a stuck gate on its next movement |
 | `train-cmd reset P1` | Request the Train simulator's reset behavior |
 | `train-cmd scale 5` | Simulator time scale, 1–100 |
 | `train-cmd status` | Train processes status; current peer discards its text result |
@@ -92,8 +91,8 @@ a train movement, **not gate opening**. Strings are strictly parsed and use an
 independent Train queue. Arbitrary strings and lamp/gate safety bypasses are absent.
 
 Remote `p#-fault` is blocked: the current Train handler holds a mutex that its fault
-callback locks again. Use direct fault injection in the Train console, or `stuck
-P1` followed by `train P1 up` to trigger a gate fault through its tick thread.
+callback locks again. Use direct fault injection in the Train console, or
+`noexit P1 up` to trigger a train-timeout fault through its tick thread.
 See [INTEGRATION.md](INTEGRATION.md) for the exact peer issue.
 
 `ACCEPTED` means a valid receipt reply, not successful application. Current Train

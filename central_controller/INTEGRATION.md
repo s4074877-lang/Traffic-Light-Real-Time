@@ -149,7 +149,6 @@ train-cmd train-down
 train-cmd train-both
 train-cmd train P1 up
 train-cmd noexit P2 down
-train-cmd stuck P3
 train-cmd reset P1
 train-cmd scale 10
 train-cmd status
@@ -157,7 +156,7 @@ train-cmd status
 
 Valid crossings are P1-P3, directions `up`/`down` and scale 1-100. These are simulator event requests. Arbitrary raw strings are rejected. Train retains responsibility for safe reset, simulator events and command results.
 
-The parser recognizes the existing `p#-fault` syntax, but Central deliberately refuses to send it to the current Train peer. That remote handler holds Train's state mutex before invoking fault handling, whose connection check tries to lock the same mutex again. The resulting deadlock must be fixed by the Train owner. Until then, use the Train console for direct `p1-fault`, or request `train-cmd stuck P1` followed by `train-cmd train P1 up` to exercise a stuck-gate scenario through the simulator. Central prints `Not sent` for the blocked direct remote fault command.
+The parser recognizes the existing `p#-fault` syntax, but Central deliberately refuses to send it to the current Train peer. That remote handler holds Train's state mutex before invoking fault handling, whose connection check tries to lock the same mutex again. The resulting deadlock must be fixed by the Train owner. Until then, use the Train console for direct `p1-fault`, or request `train-cmd noexit P1 up` to exercise a train-timeout fault through the simulator. Central prints `Not sent` for the blocked direct remote fault command.
 
 ## Telemetry and timing agreement
 

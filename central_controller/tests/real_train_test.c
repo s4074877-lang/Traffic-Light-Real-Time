@@ -179,14 +179,16 @@ int main(int argc, char *argv[]) {
     require(line_contains(response, "P1 ", "Gate OPEN") && line_contains(response, "P2 ", "Gate OPEN") &&
             line_contains(response, "P3 ", "Gate OPEN"), "real Train initial gates are all reported OPEN");
 
-    /* Five simulated seconds per real second leaves closed phases long enough
-     * to observe through Train's one-second telemetry period. This is a real
-     * existing simulator command, not a change to the teammate's timings. */
-    command_receipt("train-cmd scale 5", "train-sim scale 5");
-    command_receipt("train-cmd stuck P1", "train-sim stuck P1");
-    command_receipt("train-cmd train-up", "train-sim train-up");
+    /* Ten simulated seconds per real second still leaves closed phases longer
+     * than Train's one-second telemetry period, and reaches the sixty-second
+     * train timeout within this window. These are real existing simulator
+     * commands, not a change to the teammate's timings. A train that never
+     * leaves P1 faults that crossing while the DOWN train works normally. */
+    command_receipt("train-cmd scale 10", "train-sim scale 10");
+    command_receipt("train-cmd noexit P1 up", "train-sim noexit P1 up");
+    command_receipt("train-cmd train-down", "train-sim train-down");
     started = central_monotonic_ns();
-    until = started + UINT64_C(11000000000);
+    until = started + UINT64_C(14000000000);
     do {
         if (request("status")) {
             if (line_contains(response, "P3 ", "Gate CLOSED") || line_contains(response, "P2 ", "Gate CLOSED"))
@@ -197,10 +199,10 @@ int main(int argc, char *argv[]) {
         pump(30);
     } while (central_monotonic_ns() < until);
     require(saw_closed, "normal crossing gate CLOSED is displayed from real Train telemetry");
-    require(saw_fault, "stuck P1 causes a reported gate fault during the real train-up sequence");
+    require(saw_fault, "a train that never leaves P1 causes a reported fault during the real train-down sequence");
     require(request("faults") && line_contains(response, "P1 ", "P1:") && strstr(response, "CRITICAL"),
             "real Train compact fault retains P1 description and critical severity");
-    require(request("status") && line_contains(response, "P2 ", "Gate OPEN") && line_contains(response, "P3 ", "Gate OPEN"),
+    require(wait_snapshot("P2 ", "Gate OPEN", 4000) && line_contains(response, "P3 ", "Gate OPEN"),
             "unaffected crossings report OPEN again after their train movement");
 
     /* The full sequence has ended before reset. An ACK while Train is BUSY

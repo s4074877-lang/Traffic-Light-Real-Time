@@ -299,7 +299,6 @@ static void display_command_internal(train_ui_state_t *ui)
     printf("  %sFault Injection:%s\n", COLOR_BOLD, COLOR_RESET);
     printf("    %sp#-fault%s       - Inject fault (e.g., p1-fault)\n", COLOR_CYAN, COLOR_RESET);
     printf("    %sreset P#%s       - Reset fault (e.g., reset P1)\n", COLOR_CYAN, COLOR_RESET);
-    printf("    %sstuck P#%s       - Make gate stuck\n", COLOR_CYAN, COLOR_RESET);
     printf("\n");
     printf("  %sSimulator:%s\n", COLOR_BOLD, COLOR_RESET);
     printf("    %sscale N%s        - Set time scale (1-100)\n", COLOR_CYAN, COLOR_RESET);
